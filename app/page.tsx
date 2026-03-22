@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChatMessage,
   ChatSession,
@@ -25,6 +25,8 @@ type IndexJob = {
   indexedChunks: number;
   error?: string;
 };
+
+type LlmAvailability = Record<LlmProvider, boolean>;
 
 const MODEL_OPTIONS: Record<LlmProvider, string[]> = {
   openai: ["gpt-5.4-mini", "gpt-5.4", "gpt-4.1"],
@@ -52,16 +54,25 @@ export default function Home() {
   const [activeSheetIndex, setActiveSheetIndex] = useState(0);
   const [pdfViewerUrl, setPdfViewerUrl] = useState("");
   const [selectedProvider, setSelectedProvider] = useState<LlmProvider>("openai");
-  const [selectedModel, setSelectedModel] = useState("gpt-4o-mini");
+  const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS.openai[0]);
   const [customModel, setCustomModel] = useState("");
   const [isModelSwitcherOpen, setIsModelSwitcherOpen] = useState(false);
   const [isProviderDropdownOpen, setIsProviderDropdownOpen] = useState(false);
+  const [llmAvailability, setLlmAvailability] = useState<LlmAvailability>({
+    openai: false,
+    gemini: false,
+    perplexity: false,
+  });
+  const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
+  const [createShouldIndex, setCreateShouldIndex] = useState(true);
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexJobId, setIndexJobId] = useState("");
   const [indexJob, setIndexJob] = useState<IndexJob | null>(null);
+  const [indexingProjectId, setIndexingProjectId] = useState("");
   const [hasElectronPicker, setHasElectronPicker] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
+  const chatFormRef = useRef<HTMLFormElement | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -77,6 +88,13 @@ export default function Home() {
     () => chatSessions.find((session) => session.id === selectedSessionId) ?? null,
     [chatSessions, selectedSessionId],
   );
+  const statusText = status || "Ready";
+  const statusLower = statusText.toLowerCase();
+  const statusTone = statusLower.includes("error") || statusLower.includes("failed")
+    ? "error"
+    : isLoading || isIndexing || isFileLoading
+      ? "working"
+      : "ready";
 
   const loadProjects = useCallback(async () => {
     const res = await fetch("/api/projects");
@@ -231,6 +249,21 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    void (async () => {
+      const res = await fetch("/api/models/availability");
+      const data = (await res.json()) as Partial<LlmAvailability>;
+      if (res.ok) {
+        setLlmAvailability((prev) => ({
+          ...prev,
+          openai: Boolean(data.openai),
+          gemini: Boolean(data.gemini),
+          perplexity: Boolean(data.perplexity),
+        }));
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     void loadProjects().catch((error) => {
       setStatus(error instanceof Error ? error.message : "Failed to load projects");
     });
@@ -293,47 +326,10 @@ export default function Home() {
 
   const activeSheet = spreadsheetSheets[activeSheetIndex];
 
-  async function handleCreateProject(event: FormEvent) {
-    event.preventDefault();
-    setIsLoading(true);
-    setStatus("Creating project...");
-
-    try {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: projectName, folderPath }),
-      });
-      const data = (await res.json()) as { error?: string; project?: Project };
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to create project");
-      }
-
-      setProjectName("");
-      setFolderPath("");
-      setChatHistory([]);
-      setStatus("Project created.");
-      await loadProjects();
-      if (data.project?.id) {
-        setSelectedProjectId(data.project.id);
-        await loadSessions(data.project.id);
-        await loadFiles(data.project.id);
-      }
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Unknown error");
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  async function handleIndexProject() {
-    if (!selectedProjectId) {
-      setStatus("Select a project first.");
-      return;
-    }
-
+  async function startIndexForProject(projectId: string) {
     setIsLoading(true);
     setIsIndexing(true);
+    setIndexingProjectId(projectId);
     setIndexJob(null);
     setIndexJobId("");
     setStatus("Indexing files...");
@@ -342,7 +338,7 @@ export default function Home() {
       const res = await fetch("/api/index", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: selectedProjectId }),
+        body: JSON.stringify({ projectId }),
       });
       const data = (await res.json()) as { error?: string; job?: IndexJob };
 
@@ -361,6 +357,56 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function handleCreateProject(event: FormEvent) {
+    event.preventDefault();
+    if (!projectName.trim() || !folderPath.trim()) {
+      setStatus("Project name and folder path are required.");
+      return;
+    }
+
+    setIsLoading(true);
+    setStatus("Creating project...");
+
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: projectName, folderPath }),
+      });
+      const data = (await res.json()) as { error?: string; project?: Project };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to create project");
+      }
+
+      setProjectName("");
+      setFolderPath("");
+      setChatHistory([]);
+      setIsCreateProjectModalOpen(false);
+      setStatus("Project created.");
+      await loadProjects();
+      if (data.project?.id) {
+        setSelectedProjectId(data.project.id);
+        await loadSessions(data.project.id);
+        await loadFiles(data.project.id);
+        if (createShouldIndex) {
+          await startIndexForProject(data.project.id);
+        }
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleIndexProject() {
+    if (!selectedProjectId) {
+      setStatus("Select a project first.");
+      return;
+    }
+    await startIndexForProject(selectedProjectId);
   }
 
   async function handleCreateChatSession() {
@@ -399,6 +445,18 @@ export default function Home() {
     }
     if (!message.trim()) {
       setStatus("Enter a message first.");
+      return;
+    }
+    if (!llmAvailability[selectedProvider]) {
+      const keyName =
+        selectedProvider === "openai"
+          ? "OPENAI_API_KEY"
+          : selectedProvider === "gemini"
+            ? "GEMINI_API_KEY"
+            : "PERPLEXITY_API_KEY";
+      setStatus(
+        `Missing ${keyName}. Add it to your .env.local and restart the app before using ${selectedProvider}.`,
+      );
       return;
     }
 
@@ -506,7 +564,7 @@ export default function Home() {
   }, [isModelSwitcherOpen]);
 
   useEffect(() => {
-    if (!isIndexing || !indexJobId || !selectedProjectId) {
+    if (!isIndexing || !indexJobId || !indexingProjectId) {
       return;
     }
     const timer = window.setInterval(async () => {
@@ -524,7 +582,7 @@ export default function Home() {
         setStatus(
           `Indexed. scanned=${data.job.scannedFiles} changed=${data.job.changedFiles} skipped=${data.job.skippedFiles} chunks=${data.job.indexedChunks}`,
         );
-        await loadFiles(selectedProjectId);
+        await loadFiles(indexingProjectId);
       } else if (data.job.status === "failed") {
         setIsIndexing(false);
         setStatus(data.job.error || "Indexing failed");
@@ -532,7 +590,7 @@ export default function Home() {
     }, 900);
 
     return () => window.clearInterval(timer);
-  }, [isIndexing, indexJobId, selectedProjectId, loadFiles]);
+  }, [isIndexing, indexJobId, indexingProjectId, loadFiles]);
 
   return (
     <main className="h-screen bg-zinc-950 text-zinc-100">
@@ -541,47 +599,13 @@ export default function Home() {
           <h1 className="text-xl font-semibold">Local Wikis</h1>
 
           <section className="space-y-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
-              Create Project
-            </h2>
-            <form className="flex flex-col gap-2" onSubmit={handleCreateProject}>
-              <input
-                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
-                placeholder="Project name"
-                value={projectName}
-                onChange={(event) => setProjectName(event.target.value)}
-              />
-              <input
-                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
-                placeholder="/absolute/path/to/folder"
-                value={folderPath}
-                onChange={(event) => setFolderPath(event.target.value)}
-              />
-              <div className="flex gap-2">
-                <button
-                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm hover:bg-zinc-700"
-                  type="button"
-                  onClick={handlePickFolder}
-                >
-                  Pick Folder
-                </button>
-                <button
-                  className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium hover:bg-emerald-600 disabled:opacity-60"
-                  type="submit"
-                  disabled={isLoading || !projectName.trim() || !folderPath.trim()}
-                >
-                  Create
-                </button>
-              </div>
-              {!hasElectronPicker && (
-                <p className="text-xs text-amber-400">
-                  Electron not detected in this window. Paste an absolute path or open the Electron app window.
-                </p>
-              )}
-              <p className="truncate text-xs text-zinc-400">
-                {folderPath || "No folder selected"}
-              </p>
-            </form>
+            <button
+              className="w-full rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-600"
+              type="button"
+              onClick={() => setIsCreateProjectModalOpen(true)}
+            >
+              + New Project
+            </button>
           </section>
 
           <section className="space-y-2">
@@ -670,13 +694,28 @@ export default function Home() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <div
+                className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300"
+                title={statusText}
+              >
+                <span
+                  className={`inline-block h-2 w-2 rounded-full ${
+                    statusTone === "error"
+                      ? "bg-red-500"
+                      : statusTone === "working"
+                        ? "bg-blue-400 animate-pulse"
+                        : "bg-emerald-500 animate-pulse"
+                  }`}
+                />
+                <span>{statusTone === "working" ? "Working" : "Ready"}</span>
+              </div>
               <button
                 className="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium hover:bg-blue-600 disabled:opacity-60"
                 onClick={handleIndexProject}
                 disabled={isLoading || !selectedProject}
                 type="button"
               >
-                Index Project
+                Re-index Project
               </button>
               <button
                 className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700"
@@ -758,6 +797,11 @@ export default function Home() {
                 <p className="text-xs text-zinc-400">
                   API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`
                 </p>
+                {!llmAvailability[selectedProvider] && (
+                  <p className="rounded-md border border-amber-500/30 bg-amber-900/20 px-2 py-1 text-xs text-amber-300">
+                    Missing key for {selectedProvider}. Add it to `.env.local` and restart.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -816,22 +860,36 @@ export default function Home() {
                 ))}
               </div>
 
-              <form className="border-t border-zinc-800 p-4" onSubmit={handleAsk}>
-                <div className="flex gap-3">
+              <form className="border-t border-zinc-800 p-4" onSubmit={handleAsk} ref={chatFormRef}>
+                <div className="flex items-end gap-3 rounded-3xl border border-zinc-700 bg-zinc-950 px-3 py-2">
                   <textarea
-                    className="min-h-16 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                    className="min-h-12 max-h-40 flex-1 resize-y bg-transparent px-2 py-2 text-sm outline-none"
                     value={message}
                     onChange={(event) => setMessage(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        if (!isLoading && selectedProject && message.trim()) {
+                          chatFormRef.current?.requestSubmit();
+                        }
+                      }
+                    }}
                     placeholder="Ask a question about your indexed files..."
                   />
                   <button
-                    className="h-fit rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium hover:bg-emerald-600 disabled:opacity-60"
+                    className="grid h-10 w-10 place-items-center rounded-full bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-60"
                     type="submit"
                     disabled={isLoading || !selectedProject || !message.trim()}
+                    aria-label="Send message"
                   >
-                    Ask
+                    <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current" aria-hidden="true">
+                      <path d="M3.4 20.6 21.2 13a1 1 0 0 0 0-1.8L3.4 3.4a.8.8 0 0 0-1.1 1l2.5 7.3a.8.8 0 0 0 .75.54h7.4a.75.75 0 0 1 0 1.5H5.55a.8.8 0 0 0-.75.54L2.3 21.6a.8.8 0 0 0 1.1 1Z" />
+                    </svg>
                   </button>
                 </div>
+                <p className="mt-2 px-2 text-[11px] text-zinc-500">
+                  Enter to send, Shift+Enter for a new line.
+                </p>
               </form>
             </>
           ) : (
@@ -952,9 +1010,80 @@ export default function Home() {
           )}
         </section>
       </div>
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-lg border border-zinc-800 bg-zinc-900/95 px-4 py-2 text-xs text-zinc-300 shadow-lg">
-        {status || "Ready"}
-      </div>
+      {isCreateProjectModalOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-zinc-100">Create Project</h3>
+                <p className="text-sm text-zinc-400">
+                  Add a name, choose a folder, and optionally index immediately.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => setIsCreateProjectModalOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            <form className="space-y-3" onSubmit={handleCreateProject}>
+              <input
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                placeholder="Project name"
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+              />
+              <input
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                placeholder="/absolute/path/to/folder"
+                value={folderPath}
+                onChange={(event) => setFolderPath(event.target.value)}
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm hover:bg-zinc-700"
+                  type="button"
+                  onClick={handlePickFolder}
+                >
+                  Pick Folder
+                </button>
+                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={createShouldIndex}
+                    onChange={(event) => setCreateShouldIndex(event.target.checked)}
+                  />
+                  Index right after create
+                </label>
+              </div>
+              {!hasElectronPicker && (
+                <p className="text-xs text-amber-400">
+                  Electron not detected here. Paste an absolute path or open Electron window.
+                </p>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+                  onClick={() => setIsCreateProjectModalOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-60"
+                  disabled={isLoading || !projectName.trim() || !folderPath.trim()}
+                >
+                  {createShouldIndex ? "Create & Index" : "Create Project"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       {isIndexing && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl">

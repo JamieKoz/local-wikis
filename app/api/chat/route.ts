@@ -48,6 +48,31 @@ export async function POST(request: Request) {
       );
     }
 
+    const hasProviderKey =
+      provider === "openai"
+        ? Boolean(process.env.OPENAI_API_KEY)
+        : provider === "gemini"
+          ? Boolean(process.env.GEMINI_API_KEY)
+          : Boolean(process.env.PERPLEXITY_API_KEY);
+    if (!hasProviderKey) {
+      const keyName =
+        provider === "openai"
+          ? "OPENAI_API_KEY"
+          : provider === "gemini"
+            ? "GEMINI_API_KEY"
+            : "PERPLEXITY_API_KEY";
+      return NextResponse.json(
+        { error: `Missing ${keyName} for provider ${provider}` },
+        { status: 400 },
+      );
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json(
+        { error: "Missing OPENAI_API_KEY for embeddings (required for retrieval)." },
+        { status: 400 },
+      );
+    }
+
     if (!sessionId) {
       const newSession = createChatSession(projectId, message.slice(0, 80));
       sessionId = newSession.id;
