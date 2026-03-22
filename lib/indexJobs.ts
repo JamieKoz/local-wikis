@@ -49,9 +49,12 @@ export function createIndexJob(projectId: string, inputFolderPath?: string): Ind
     throw new Error("Project not found");
   }
 
-  const folderPath = inputFolderPath?.trim()
-    ? path.resolve(inputFolderPath)
-    : project.folderPath;
+  const folderPaths = inputFolderPath?.trim()
+    ? [path.resolve(inputFolderPath)]
+    : project.folderPaths.length > 0
+      ? project.folderPaths.map((folderPath) => path.resolve(folderPath))
+      : [project.folderPath];
+  const folderPath = folderPaths[0];
   const id = randomId();
 
   const job: IndexJob = {
@@ -72,11 +75,11 @@ export function createIndexJob(projectId: string, inputFolderPath?: string): Ind
   };
 
   jobs.set(id, job);
-  void runIndexJob(id);
+  void runIndexJob(id, folderPaths);
   return job;
 }
 
-async function runIndexJob(jobId: string) {
+async function runIndexJob(jobId: string, folderPaths: string[]) {
   const current = jobs.get(jobId);
   if (!current) {
     return;
@@ -84,7 +87,8 @@ async function runIndexJob(jobId: string) {
 
   try {
     updateJob(jobId, { status: "running", stage: "Scanning files..." });
-    const files = await scanFolder(current.folderPath);
+    const allFiles = await Promise.all(folderPaths.map((folderPath) => scanFolder(folderPath)));
+    const files = allFiles.flat();
     updateJob(jobId, {
       scannedFiles: files.length,
       stage: "Indexing files...",
@@ -94,14 +98,20 @@ async function runIndexJob(jobId: string) {
     let skippedFiles = 0;
     let indexedChunks = 0;
     let processedFiles = 0;
+    const multipleRoots = folderPaths.length > 1;
 
     for (const file of files) {
-      const relativePath = path.relative(current.folderPath, file.path) || file.path;
+      const matchedRoot =
+        folderPaths.find((rootPath) => file.path.startsWith(path.resolve(rootPath))) || current.folderPath;
+      const relativePath = path.relative(matchedRoot, file.path) || file.path;
+      const displayPath = multipleRoots
+        ? `${path.basename(matchedRoot)}/${relativePath}`
+        : relativePath;
       updateJob(jobId, {
-        currentFile: relativePath,
+        currentFile: displayPath,
         currentFileChunkIndex: 0,
         currentFileChunkTotal: 0,
-        stage: `Processing ${relativePath}`,
+        stage: `Processing ${displayPath}`,
       });
 
       const result = await indexDocument({
@@ -111,8 +121,8 @@ async function runIndexJob(jobId: string) {
       }, {
         onChunkProgress: ({ chunkIndex, totalChunks }) => {
           updateJob(jobId, {
-            stage: `Embedding ${relativePath} (${chunkIndex}/${totalChunks})`,
-            currentFile: relativePath,
+            stage: `Embedding ${displayPath} (${chunkIndex}/${totalChunks})`,
+            currentFile: displayPath,
             currentFileChunkIndex: chunkIndex,
             currentFileChunkTotal: totalChunks,
           });
@@ -133,7 +143,7 @@ async function runIndexJob(jobId: string) {
         changedFiles,
         skippedFiles,
         indexedChunks,
-        currentFile: relativePath,
+        currentFile: displayPath,
         currentFileChunkIndex: result.changed ? result.chunks : 0,
         currentFileChunkTotal: result.changed ? result.chunks : 0,
       });

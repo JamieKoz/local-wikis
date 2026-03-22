@@ -24,7 +24,8 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const absolutePath = resolveProjectFilePath(project.folderPath, filePath);
+    const roots = project.folderPaths.length ? project.folderPaths : [project.folderPath];
+    const absolutePath = resolveProjectFilePath(roots, filePath);
     const ext = path.extname(absolutePath).toLowerCase();
 
     if (ext !== ".pdf") {
@@ -34,7 +35,7 @@ export async function GET(request: Request) {
       );
     }
 
-    const fileBuffer = readRawProjectFile(project.folderPath, filePath);
+    const fileBuffer = readRawProjectFile(roots, filePath);
     const fileBytes = new Uint8Array(fileBuffer);
     return new Response(fileBytes, {
       headers: {

@@ -80,6 +80,17 @@ export default function Home() {
   const [isAsking, setIsAsking] = useState(false);
   const chatFormRef = useRef<HTMLFormElement | null>(null);
 
+  function parseFolderPaths(input: string): string[] {
+    return Array.from(
+      new Set(
+        input
+          .split("\n")
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
@@ -318,7 +329,12 @@ export default function Home() {
 
     const picked = await window.electronAPI.pickFolder();
     if (picked) {
-      setFolderPath(picked);
+      const existing = parseFolderPaths(folderPath);
+      if (existing.includes(picked)) {
+        setStatus("Folder already selected.");
+        return;
+      }
+      setFolderPath(existing.length === 0 ? picked : `${existing.join("\n")}\n${picked}`);
       setStatus("Folder selected.");
     }
   }
@@ -360,7 +376,8 @@ export default function Home() {
 
   async function handleCreateProject(event: FormEvent) {
     event.preventDefault();
-    if (!projectName.trim() || !folderPath.trim()) {
+    const folderPaths = parseFolderPaths(folderPath);
+    if (!projectName.trim() || folderPaths.length === 0) {
       setStatus("Project name and folder path are required.");
       return;
     }
@@ -372,7 +389,7 @@ export default function Home() {
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: projectName, folderPath }),
+        body: JSON.stringify({ name: projectName, folderPaths }),
       });
       const data = (await res.json()) as { error?: string; project?: Project };
       if (!res.ok) {
@@ -393,6 +410,47 @@ export default function Home() {
           await startIndexForProject(data.project.id);
         }
       }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleAddFolderToProject() {
+    if (!selectedProjectId) {
+      setStatus("Select a project first.");
+      return;
+    }
+
+    let pickedFolder = "";
+    if (hasElectronPicker && window.electronAPI?.pickFolder) {
+      pickedFolder = (await window.electronAPI.pickFolder()) || "";
+    } else {
+      pickedFolder = window.prompt("Enter absolute folder path to add:")?.trim() || "";
+    }
+    if (!pickedFolder) {
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "add_folder",
+          projectId: selectedProjectId,
+          folderPath: pickedFolder,
+        }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to add folder");
+      }
+      await loadProjects();
+      await loadFiles(selectedProjectId);
+      setStatus("Folder added to project.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unknown error");
     } finally {
@@ -429,6 +487,75 @@ export default function Home() {
       setSelectedSessionId(data.session.id);
       setChatHistory([]);
       setStatus("New chat created.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleDeleteProject(projectId: string, projectName: string) {
+    const confirmed = window.confirm(
+      `Delete project "${projectName}"? This will remove indexed documents, chunks, and chats.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/projects", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to delete project");
+      }
+
+      if (selectedProjectId === projectId) {
+        setSelectedProjectId("");
+        setSelectedSessionId("");
+        setChatHistory([]);
+        setChatSessions([]);
+        setProjectFiles([]);
+      }
+      await loadProjects();
+      setStatus("Project deleted.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleDeleteChatSession(sessionId: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    const confirmed = window.confirm("Delete this chat?");
+    if (!confirmed) {
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/chat/sessions", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: selectedProjectId, sessionId }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to delete chat");
+      }
+      if (selectedSessionId === sessionId) {
+        setSelectedSessionId("");
+        setChatHistory([]);
+      }
+      await loadSessions(selectedProjectId);
+      setStatus("Chat deleted.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unknown error");
     } finally {
@@ -626,18 +753,36 @@ export default function Home() {
               {projects.map((project) => {
                 const active = project.id === selectedProjectId;
                 return (
-                  <button
+                  <div
                     key={project.id}
-                    className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${active
+                    className={`flex items-start gap-2 rounded-lg border px-2 py-2 text-sm transition ${active
                       ? "border-emerald-600 bg-emerald-900/30"
                       : "border-zinc-700 bg-zinc-900 hover:bg-zinc-800"
                       }`}
-                    onClick={() => setSelectedProjectId(project.id)}
-                    type="button"
                   >
-                    <p className="font-medium">{project.name}</p>
-                    <p className="truncate text-xs text-zinc-400">{project.folderPath}</p>
-                  </button>
+                    <button
+                      className="min-w-0 flex-1 text-left"
+                      onClick={() => setSelectedProjectId(project.id)}
+                      type="button"
+                    >
+                      <p className="font-medium">{project.name}</p>
+                      <p className="truncate text-xs text-zinc-400">{project.folderPath}</p>
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleDeleteProject(project.id, project.name);
+                      }}
+                      title="Delete project"
+                      aria-label="Delete project"
+                    >
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current" aria-hidden="true">
+                        <path d="M9 3.75A2.25 2.25 0 0 1 11.25 1.5h1.5A2.25 2.25 0 0 1 15 3.75V4.5h4.5a.75.75 0 0 1 0 1.5h-1.03l-.68 13.03A2.25 2.25 0 0 1 15.55 21H8.45a2.25 2.25 0 0 1-2.24-1.97L5.53 6H4.5a.75.75 0 0 1 0-1.5H9v-.75ZM13.5 4.5v-.75a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V4.5h3Zm-4.27 3.22a.75.75 0 0 1 .75.71l.33 8.25a.75.75 0 1 1-1.5.06l-.33-8.25a.75.75 0 0 1 .71-.77h.04Zm5.54 0a.75.75 0 0 1 .71.77l-.33 8.25a.75.75 0 1 1-1.5-.06l.33-8.25a.75.75 0 0 1 .75-.71h.04Z" />
+                      </svg>
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -664,20 +809,38 @@ export default function Home() {
               {chatSessions.map((session) => {
                 const active = session.id === selectedSessionId;
                 return (
-                  <button
+                  <div
                     key={session.id}
-                    type="button"
-                    onClick={() => setSelectedSessionId(session.id)}
-                    className={`w-full rounded-lg border p-2 text-left text-xs transition ${active
+                    className={`flex items-start gap-2 rounded-lg border p-2 text-xs transition ${active
                       ? "border-emerald-600 bg-emerald-900/25"
                       : "border-zinc-800 bg-zinc-900 hover:bg-zinc-800"
                       }`}
                   >
-                    <p className="truncate font-medium text-zinc-200">{session.title}</p>
-                    <p className="mt-1 text-[10px] text-zinc-500">
-                      {new Date(session.updatedAt).toLocaleString()}
-                    </p>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSessionId(session.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <p className="truncate font-medium text-zinc-200">{session.title}</p>
+                      <p className="mt-1 text-[10px] text-zinc-500">
+                        {new Date(session.updatedAt).toLocaleString()}
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleDeleteChatSession(session.id);
+                      }}
+                      title="Delete chat"
+                      aria-label="Delete chat"
+                    >
+                      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current" aria-hidden="true">
+                        <path d="M9 3.75A2.25 2.25 0 0 1 11.25 1.5h1.5A2.25 2.25 0 0 1 15 3.75V4.5h4.5a.75.75 0 0 1 0 1.5h-1.03l-.68 13.03A2.25 2.25 0 0 1 15.55 21H8.45a2.25 2.25 0 0 1-2.24-1.97L5.53 6H4.5a.75.75 0 0 1 0-1.5H9v-.75ZM13.5 4.5v-.75a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V4.5h3Zm-4.27 3.22a.75.75 0 0 1 .75.71l.33 8.25a.75.75 0 1 1-1.5.06l-.33-8.25a.75.75 0 0 1 .71-.77h.04Zm5.54 0a.75.75 0 0 1 .71.77l-.33 8.25a.75.75 0 1 1-1.5-.06l.33-8.25a.75.75 0 0 1 .75-.71h.04Z" />
+                      </svg>
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -700,7 +863,9 @@ export default function Home() {
                 {selectedProject ? selectedProject.name : "Select a project"}
               </h2>
               <p className="text-sm text-zinc-400">
-                {selectedProject?.folderPath || "No project selected"}
+                {selectedProject
+                  ? `${selectedProject.folderPaths.length} folder(s) indexed`
+                  : "No project selected"}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -711,6 +876,14 @@ export default function Home() {
                 type="button"
               >
                 Re-index Project
+              </button>
+              <button
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-60"
+                onClick={handleAddFolderToProject}
+                disabled={isLoading || !selectedProject}
+                type="button"
+              >
+                Add Folder
               </button>
               <button
                 className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700"
@@ -936,8 +1109,8 @@ export default function Home() {
             </>
           ) : (
             <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr]">
-              <div className="border-r border-zinc-800 p-3">
-                <div className="max-h-full space-y-1 overflow-y-auto">
+              <div className="min-h-0 border-r border-zinc-800 p-3">
+                <div className="h-full space-y-1 overflow-y-auto">
                   {projectFiles.length === 0 && (
                     <p className="text-xs text-zinc-500">No supported files found.</p>
                   )}
@@ -1078,9 +1251,9 @@ export default function Home() {
                 value={projectName}
                 onChange={(event) => setProjectName(event.target.value)}
               />
-              <input
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
-                placeholder="/absolute/path/to/folder"
+              <textarea
+                className="min-h-24 w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                placeholder="One folder path per line"
                 value={folderPath}
                 onChange={(event) => setFolderPath(event.target.value)}
               />

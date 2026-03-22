@@ -19,7 +19,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const files = listProjectFiles(project.folderPath);
+    const files = listProjectFiles(project.folderPaths.length ? project.folderPaths : [project.folderPath]);
     return NextResponse.json({ files });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

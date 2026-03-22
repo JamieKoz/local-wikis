@@ -29,8 +29,9 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const absolutePath = resolveProjectFilePath(project.folderPath, filePath);
-    const content = readTextProjectFile(project.folderPath, absolutePath);
+    const roots = project.folderPaths.length ? project.folderPaths : [project.folderPath];
+    const absolutePath = resolveProjectFilePath(roots, filePath);
+    const content = readTextProjectFile(roots, absolutePath);
 
     return NextResponse.json({
       path: absolutePath,
@@ -66,7 +67,8 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const absolutePath = writeTextProjectFile(project.folderPath, filePath, content);
+    const roots = project.folderPaths.length ? project.folderPaths : [project.folderPath];
+    const absolutePath = writeTextProjectFile(roots, filePath, content);
     const result = await indexDocument({
       projectId,
       filePath: absolutePath,

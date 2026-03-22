@@ -2,14 +2,99 @@ import fs from "node:fs";
 import path from "node:path";
 import * as XLSX from "xlsx";
 
-const EDITABLE_EXTENSIONS = new Set([".txt", ".md", ".js", ".ts", ".json", ".csv"]);
+const EDITABLE_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".mdx",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".mjs",
+  ".cjs",
+  ".json",
+  ".csv",
+  ".py",
+  ".java",
+  ".go",
+  ".rs",
+  ".rb",
+  ".php",
+  ".c",
+  ".h",
+  ".cpp",
+  ".hpp",
+  ".cc",
+  ".cs",
+  ".swift",
+  ".kt",
+  ".kts",
+  ".scala",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".sql",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".html",
+  ".css",
+  ".scss",
+  ".vue",
+  ".svelte",
+  ".dart",
+  ".r",
+  ".lua",
+  ".pl",
+]);
 const BROWSABLE_EXTENSIONS = new Set([
   ".txt",
   ".md",
+  ".markdown",
+  ".mdx",
   ".js",
+  ".jsx",
   ".ts",
+  ".tsx",
+  ".mjs",
+  ".cjs",
   ".json",
   ".csv",
+  ".py",
+  ".java",
+  ".go",
+  ".rs",
+  ".rb",
+  ".php",
+  ".c",
+  ".h",
+  ".cpp",
+  ".hpp",
+  ".cc",
+  ".cs",
+  ".swift",
+  ".kt",
+  ".kts",
+  ".scala",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".sql",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".html",
+  ".css",
+  ".scss",
+  ".vue",
+  ".svelte",
+  ".dart",
+  ".r",
+  ".lua",
+  ".pl",
   ".xlsx",
   ".pdf",
 ]);
@@ -34,29 +119,38 @@ function toRealPathIfExists(inputPath: string): string {
   return fs.realpathSync(inputPath);
 }
 
-export function resolveProjectFilePath(projectRoot: string, targetPath: string): string {
-  const resolvedRoot = toRealPathIfExists(path.resolve(projectRoot));
-  const normalized = path.isAbsolute(targetPath)
-    ? path.resolve(targetPath)
-    : path.resolve(resolvedRoot, targetPath);
-  const normalizedRealPath = toRealPathIfExists(normalized);
+export function resolveProjectFilePath(projectRoots: string | string[], targetPath: string): string {
+  const roots = (Array.isArray(projectRoots) ? projectRoots : [projectRoots]).map((root) =>
+    toRealPathIfExists(path.resolve(root)),
+  );
 
-  if (!isInsideProject(resolvedRoot, normalizedRealPath)) {
-    throw new Error("File path must be inside the project folder");
+  if (path.isAbsolute(targetPath)) {
+    const normalized = toRealPathIfExists(path.resolve(targetPath));
+    if (!roots.some((root) => isInsideProject(root, normalized))) {
+      throw new Error("File path must be inside one of the project folders");
+    }
+    return normalized;
   }
 
-  return normalizedRealPath;
+  for (const root of roots) {
+    const normalized = toRealPathIfExists(path.resolve(root, targetPath));
+    if (isInsideProject(root, normalized)) {
+      return normalized;
+    }
+  }
+
+  throw new Error("File path must be inside one of the project folders");
 }
 
 export function isEditableExtension(filePath: string): boolean {
   return EDITABLE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
-export function listProjectFiles(projectRoot: string): ProjectFile[] {
-  const root = path.resolve(projectRoot);
+export function listProjectFiles(projectRoots: string[]): ProjectFile[] {
   const files: ProjectFile[] = [];
+  const dedupe = new Set<string>();
 
-  function walk(currentPath: string) {
+  function walk(root: string, currentPath: string) {
     const entries = fs.readdirSync(currentPath, { withFileTypes: true });
     for (const entry of entries) {
       const absolutePath = path.join(currentPath, entry.name);
@@ -65,7 +159,7 @@ export function listProjectFiles(projectRoot: string): ProjectFile[] {
         if (IGNORED_DIRS.has(entry.name)) {
           continue;
         }
-        walk(absolutePath);
+        walk(root, absolutePath);
         continue;
       }
 
@@ -78,22 +172,35 @@ export function listProjectFiles(projectRoot: string): ProjectFile[] {
         continue;
       }
 
+      if (dedupe.has(absolutePath)) {
+        continue;
+      }
+      dedupe.add(absolutePath);
+      const relative = path.relative(root, absolutePath);
+      const displayPath =
+        projectRoots.length > 1 ? `${path.basename(root)}/${relative}` : relative;
       files.push({
         path: absolutePath,
-        relativePath: path.relative(root, absolutePath),
+        relativePath: displayPath,
         extension,
         editable: EDITABLE_EXTENSIONS.has(extension),
       });
     }
   }
 
-  walk(root);
+  for (const rootPath of projectRoots) {
+    const root = path.resolve(rootPath);
+    if (!fs.existsSync(root)) {
+      continue;
+    }
+    walk(root, root);
+  }
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   return files;
 }
 
-export function readTextProjectFile(projectRoot: string, targetPath: string): string {
-  const fullPath = resolveProjectFilePath(projectRoot, targetPath);
+export function readTextProjectFile(projectRoots: string | string[], targetPath: string): string {
+  const fullPath = resolveProjectFilePath(projectRoots, targetPath);
   const ext = path.extname(fullPath).toLowerCase();
   if (ext === ".pdf") {
     throw new Error("PDF files are view-only and should be opened with the PDF viewer");
@@ -117,8 +224,8 @@ export type SpreadsheetSheet = {
   rows: string[][];
 };
 
-export function readSpreadsheetFile(projectRoot: string, targetPath: string): SpreadsheetSheet[] {
-  const fullPath = resolveProjectFilePath(projectRoot, targetPath);
+export function readSpreadsheetFile(projectRoots: string | string[], targetPath: string): SpreadsheetSheet[] {
+  const fullPath = resolveProjectFilePath(projectRoots, targetPath);
   const ext = path.extname(fullPath).toLowerCase();
   if (ext !== ".xlsx") {
     throw new Error("Spreadsheet viewer only supports .xlsx files");
@@ -139,13 +246,13 @@ export function readSpreadsheetFile(projectRoot: string, targetPath: string): Sp
   });
 }
 
-export function readRawProjectFile(projectRoot: string, targetPath: string): Buffer {
-  const fullPath = resolveProjectFilePath(projectRoot, targetPath);
+export function readRawProjectFile(projectRoots: string | string[], targetPath: string): Buffer {
+  const fullPath = resolveProjectFilePath(projectRoots, targetPath);
   return fs.readFileSync(fullPath);
 }
 
-export function writeTextProjectFile(projectRoot: string, targetPath: string, content: string) {
-  const fullPath = resolveProjectFilePath(projectRoot, targetPath);
+export function writeTextProjectFile(projectRoots: string | string[], targetPath: string, content: string) {
+  const fullPath = resolveProjectFilePath(projectRoots, targetPath);
   if (!isEditableExtension(fullPath)) {
     throw new Error("This file type is read-only in the editor");
   }

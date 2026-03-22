@@ -2,6 +2,7 @@ export type Project = {
   id: string;
   name: string;
   folderPath: string;
+  folderPaths: string[];
   createdAt: string;
 };
 

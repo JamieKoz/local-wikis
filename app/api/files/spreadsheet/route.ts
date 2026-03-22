@@ -23,7 +23,8 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const sheets = readSpreadsheetFile(project.folderPath, filePath);
+    const roots = project.folderPaths.length ? project.folderPaths : [project.folderPath];
+    const sheets = readSpreadsheetFile(roots, filePath);
     return NextResponse.json({ sheets });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
