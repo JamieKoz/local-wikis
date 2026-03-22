@@ -3,11 +3,20 @@ import { replaceDocumentChunks, upsertDocument } from "@/lib/db";
 import { embedText } from "@/lib/embedding";
 import { hashContent } from "@/lib/hash";
 
+type IndexDocumentProgress = {
+  chunkIndex: number;
+  totalChunks: number;
+};
+
+type IndexDocumentOptions = {
+  onChunkProgress?: (progress: IndexDocumentProgress) => void;
+};
+
 export async function indexDocument(params: {
   projectId: string;
   filePath: string;
   content: string;
-}) {
+}, options: IndexDocumentOptions = {}) {
   const fileHash = hashContent(params.content);
   const document = upsertDocument({
     projectId: params.projectId,
@@ -22,13 +31,19 @@ export async function indexDocument(params: {
 
   const rawChunks = chunkText(params.content, params.filePath);
   const chunksWithEmbeddings = [];
+  const totalChunks = rawChunks.length;
 
-  for (const chunk of rawChunks) {
+  for (let i = 0; i < rawChunks.length; i += 1) {
+    const chunk = rawChunks[i];
     const embedding = await embedText(chunk.content);
     chunksWithEmbeddings.push({
       content: chunk.content,
       embedding,
       metadata: chunk.metadata,
+    });
+    options.onChunkProgress?.({
+      chunkIndex: i + 1,
+      totalChunks,
     });
   }
 

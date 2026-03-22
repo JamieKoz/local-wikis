@@ -17,7 +17,7 @@ type GeminiResponse = {
 };
 
 const DEFAULT_MODELS: Record<LlmProvider, string> = {
-  openai: "gpt-5.4-mini",
+  openai: "gpt-5.4-nano",
   gemini: "gemini-1.5-flash",
   perplexity: "sonar",
 };
@@ -27,10 +27,18 @@ type GenerateAnswerOptions = {
   model?: string;
 };
 
+function isIDontKnow(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[.!?]+$/g, "");
+  return normalized === "i don't know" || normalized === "i dont know";
+}
+
 function buildPrompt(question: string, contextChunks: string[]): string {
   return [
     "You are answering based only on the provided context.",
-    'If the answer is not in the context, say "I don\'t know".',
+    "If relevant facts exist in the context, provide the best direct answer from those facts.",
+    'Only say "I don\'t know" when the context truly has no relevant information.',
+    "Prefer concise markdown.",
+    "You may use light emojis when helpful for readability.",
     "",
     "Context:",
     contextChunks.join("\n\n---\n\n"),
@@ -64,7 +72,77 @@ async function generateWithOpenAI(prompt: string, model: string): Promise<string
   }
 
   const payload = (await response.json()) as ChatCompletionResponse;
-  return payload.choices?.[0]?.message?.content?.trim() || "I don't know";
+  const content = payload.choices?.[0]?.message?.content?.trim();
+  if (content) {
+    if (!isIDontKnow(content)) {
+      return content;
+    }
+
+    // Smaller models can be overly conservative and default to "I don't know".
+    // Re-prompt once with explicit extraction guidance when context exists.
+    if (prompt.includes("Context:") && prompt.includes("---")) {
+      const retryPrompt = [
+        "Answer using the context below.",
+        "Extract any relevant facts first, then answer directly.",
+        'Only if there are zero relevant facts, reply exactly: "I don\'t know".',
+        "Use concise markdown and optional light emojis.",
+        "",
+        prompt,
+      ].join("\n");
+
+      const conservativeRetry = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: retryPrompt }],
+          temperature: 0.1,
+        }),
+      });
+
+      if (conservativeRetry.ok) {
+        const retryPayload = (await conservativeRetry.json()) as ChatCompletionResponse;
+        const retryContent = retryPayload.choices?.[0]?.message?.content?.trim();
+        if (retryContent && !isIDontKnow(retryContent)) {
+          return retryContent;
+        }
+      }
+    }
+
+    return content;
+  }
+
+  // Some model/provider combinations can return empty content in this endpoint shape.
+  // Retry once on a known-stable OpenAI model before failing loudly.
+  if (model !== "gpt-5.4-mini") {
+    const retryResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-5.4-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+      }),
+    });
+
+    if (retryResponse.ok) {
+      const retryPayload = (await retryResponse.json()) as ChatCompletionResponse;
+      const retryContent = retryPayload.choices?.[0]?.message?.content?.trim();
+      if (retryContent) {
+        return retryContent;
+      }
+    }
+  }
+
+  throw new Error(
+    `OpenAI returned an empty response for model "${model}". Try switching model.`,
+  );
 }
 
 async function generateWithPerplexity(prompt: string, model: string): Promise<string> {
@@ -91,7 +169,11 @@ async function generateWithPerplexity(prompt: string, model: string): Promise<st
   }
 
   const payload = (await response.json()) as ChatCompletionResponse;
-  return payload.choices?.[0]?.message?.content?.trim() || "I don't know";
+  const content = payload.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error(`Perplexity returned an empty response for model "${model}".`);
+  }
+  return content;
 }
 
 async function generateWithGemini(prompt: string, model: string): Promise<string> {
@@ -120,7 +202,10 @@ async function generateWithGemini(prompt: string, model: string): Promise<string
     ?.map((part) => part.text || "")
     .join("")
     .trim();
-  return text || "I don't know";
+  if (!text) {
+    throw new Error(`Gemini returned an empty response for model "${model}".`);
+  }
+  return text;
 }
 
 export async function generateAnswer(

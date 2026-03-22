@@ -100,6 +100,7 @@ export async function POST(request: Request) {
         answer: "I don't know",
         sources: [],
         chunksUsed: 0,
+        reason: "no_indexed_chunks",
       });
     }
 
@@ -133,6 +134,7 @@ export async function POST(request: Request) {
       provider,
       model,
       sessionId,
+      reason: topChunks.length === 0 ? "no_retrieved_chunks" : "ok",
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

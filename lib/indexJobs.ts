@@ -17,6 +17,9 @@ export type IndexJob = {
   changedFiles: number;
   skippedFiles: number;
   indexedChunks: number;
+  currentFile: string;
+  currentFileChunkIndex: number;
+  currentFileChunkTotal: number;
   startedAt: string;
   completedAt?: string;
   error?: string;
@@ -62,6 +65,9 @@ export function createIndexJob(projectId: string, inputFolderPath?: string): Ind
     changedFiles: 0,
     skippedFiles: 0,
     indexedChunks: 0,
+    currentFile: "",
+    currentFileChunkIndex: 0,
+    currentFileChunkTotal: 0,
     startedAt: new Date().toISOString(),
   };
 
@@ -90,10 +96,27 @@ async function runIndexJob(jobId: string) {
     let processedFiles = 0;
 
     for (const file of files) {
+      const relativePath = path.relative(current.folderPath, file.path) || file.path;
+      updateJob(jobId, {
+        currentFile: relativePath,
+        currentFileChunkIndex: 0,
+        currentFileChunkTotal: 0,
+        stage: `Processing ${relativePath}`,
+      });
+
       const result = await indexDocument({
         projectId: current.projectId,
         filePath: file.path,
         content: file.content,
+      }, {
+        onChunkProgress: ({ chunkIndex, totalChunks }) => {
+          updateJob(jobId, {
+            stage: `Embedding ${relativePath} (${chunkIndex}/${totalChunks})`,
+            currentFile: relativePath,
+            currentFileChunkIndex: chunkIndex,
+            currentFileChunkTotal: totalChunks,
+          });
+        },
       });
 
       processedFiles += 1;
@@ -110,6 +133,9 @@ async function runIndexJob(jobId: string) {
         changedFiles,
         skippedFiles,
         indexedChunks,
+        currentFile: relativePath,
+        currentFileChunkIndex: result.changed ? result.chunks : 0,
+        currentFileChunkTotal: result.changed ? result.chunks : 0,
       });
     }
 
@@ -120,6 +146,9 @@ async function runIndexJob(jobId: string) {
       changedFiles,
       skippedFiles,
       indexedChunks,
+      currentFile: "",
+      currentFileChunkIndex: 0,
+      currentFileChunkTotal: 0,
       completedAt: new Date().toISOString(),
     });
   } catch (error) {

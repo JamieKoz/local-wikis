@@ -1,6 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   ChatMessage,
   ChatSession,
@@ -23,13 +25,16 @@ type IndexJob = {
   changedFiles: number;
   skippedFiles: number;
   indexedChunks: number;
+  currentFile: string;
+  currentFileChunkIndex: number;
+  currentFileChunkTotal: number;
   error?: string;
 };
 
 type LlmAvailability = Record<LlmProvider, boolean>;
 
 const MODEL_OPTIONS: Record<LlmProvider, string[]> = {
-  openai: ["gpt-5.4-mini", "gpt-5.4", "gpt-4.1"],
+  openai: ["gpt-5.4-nano", "gpt-5.4", "gpt-4.1"],
   gemini: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
   perplexity: ["sonar", "sonar-pro"],
 };
@@ -72,6 +77,7 @@ export default function Home() {
   const [hasElectronPicker, setHasElectronPicker] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isAsking, setIsAsking] = useState(false);
   const chatFormRef = useRef<HTMLFormElement | null>(null);
 
   const selectedProject = useMemo(
@@ -88,13 +94,6 @@ export default function Home() {
     () => chatSessions.find((session) => session.id === selectedSessionId) ?? null,
     [chatSessions, selectedSessionId],
   );
-  const statusText = status || "Ready";
-  const statusLower = statusText.toLowerCase();
-  const statusTone = statusLower.includes("error") || statusLower.includes("failed")
-    ? "error"
-    : isLoading || isIndexing || isFileLoading
-      ? "working"
-      : "ready";
 
   const loadProjects = useCallback(async () => {
     const res = await fetch("/api/projects");
@@ -461,6 +460,7 @@ export default function Home() {
     }
 
     setIsLoading(true);
+    setIsAsking(true);
     setStatus("Asking...");
 
     try {
@@ -477,7 +477,12 @@ export default function Home() {
           model: selectedModel === "__custom__" ? customModel.trim() : selectedModel,
         }),
       });
-      const data = (await res.json()) as { error?: string; sessionId?: string };
+      const data = (await res.json()) as {
+        error?: string;
+        sessionId?: string;
+        chunksUsed?: number;
+        reason?: string;
+      };
       if (!res.ok) {
         throw new Error(data.error || "Chat failed");
       }
@@ -486,11 +491,16 @@ export default function Home() {
       }
       await loadSessions(selectedProjectId);
       await loadHistory(selectedProjectId, data.sessionId || selectedSessionId);
-      setStatus("Done.");
+      if (data.reason === "no_indexed_chunks" || (data.chunksUsed ?? 0) === 0) {
+        setStatus("No indexed context found for this project. Try Re-index Project first.");
+      } else {
+        setStatus(`Done. Retrieved ${data.chunksUsed} context chunks.`);
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unknown error");
     } finally {
       setIsLoading(false);
+      setIsAsking(false);
     }
   }
 
@@ -593,8 +603,8 @@ export default function Home() {
   }, [isIndexing, indexJobId, indexingProjectId, loadFiles]);
 
   return (
-    <main className="h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto grid h-full grid-cols-[320px_1fr] gap-4 p-4">
+    <main className="h-screen overflow-hidden bg-zinc-950 text-zinc-100">
+      <div className="mx-auto grid h-full min-h-0 grid-cols-[320px_1fr] gap-4 p-4">
         <aside className="flex h-full flex-col gap-4 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
           <h1 className="text-xl font-semibold">Local Wikis</h1>
 
@@ -659,8 +669,8 @@ export default function Home() {
                     type="button"
                     onClick={() => setSelectedSessionId(session.id)}
                     className={`w-full rounded-lg border p-2 text-left text-xs transition ${active
-                        ? "border-emerald-600 bg-emerald-900/25"
-                        : "border-zinc-800 bg-zinc-900 hover:bg-zinc-800"
+                      ? "border-emerald-600 bg-emerald-900/25"
+                      : "border-zinc-800 bg-zinc-900 hover:bg-zinc-800"
                       }`}
                   >
                     <p className="truncate font-medium text-zinc-200">{session.title}</p>
@@ -683,7 +693,7 @@ export default function Home() {
           </section>
         </aside>
 
-        <section className="flex h-full flex-col rounded-2xl border border-zinc-800 bg-zinc-900/40">
+        <section className="flex h-full min-h-0 flex-col rounded-2xl border border-zinc-800 bg-zinc-900/40">
           <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
             <div>
               <h2 className="text-lg font-semibold">
@@ -694,21 +704,6 @@ export default function Home() {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <div
-                className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300"
-                title={statusText}
-              >
-                <span
-                  className={`inline-block h-2 w-2 rounded-full ${
-                    statusTone === "error"
-                      ? "bg-red-500"
-                      : statusTone === "working"
-                        ? "bg-blue-400 animate-pulse"
-                        : "bg-emerald-500 animate-pulse"
-                  }`}
-                />
-                <span>{statusTone === "working" ? "Working" : "Ready"}</span>
-              </div>
               <button
                 className="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium hover:bg-blue-600 disabled:opacity-60"
                 onClick={handleIndexProject}
@@ -751,8 +746,8 @@ export default function Home() {
                           type="button"
                           title={`Available: ${MODEL_OPTIONS[provider].join(", ")}`}
                           className={`w-full rounded-md px-3 py-2 text-left text-xs ${selectedProvider === provider
-                              ? "bg-emerald-900/40 text-emerald-200"
-                              : "text-zinc-300 hover:bg-zinc-800"
+                            ? "bg-emerald-900/40 text-emerald-200"
+                            : "text-zinc-300 hover:bg-zinc-800"
                             }`}
                           onClick={() => {
                             handleProviderChange(provider);
@@ -828,6 +823,11 @@ export default function Home() {
               Files
             </button>
           </div>
+          {status && (
+            <div className="border-b border-zinc-800 px-5 py-2 text-xs text-zinc-400">
+              {status}
+            </div>
+          )}
 
           {activeView === "chat" ? (
             <>
@@ -850,7 +850,39 @@ export default function Home() {
                       : "bg-zinc-800 text-zinc-100"
                       }`}
                   >
-                    <p className="mb-2 whitespace-pre-wrap">{item.content}</p>
+                    {item.role === "assistant" ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          p: ({ children }) => <p className="mb-2 whitespace-pre-wrap">{children}</p>,
+                          ul: ({ children }) => <ul className="mb-2 list-disc pl-5">{children}</ul>,
+                          ol: ({ children }) => <ol className="mb-2 list-decimal pl-5">{children}</ol>,
+                          li: ({ children }) => <li className="mb-1">{children}</li>,
+                          code: ({ children }) => (
+                            <code className="rounded bg-zinc-900 px-1.5 py-0.5 text-xs">{children}</code>
+                          ),
+                          pre: ({ children }) => (
+                            <pre className="mb-2 overflow-x-auto rounded-md bg-zinc-900 p-3 text-xs">
+                              {children}
+                            </pre>
+                          ),
+                          a: ({ href, children }) => (
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-emerald-300 underline"
+                            >
+                              {children}
+                            </a>
+                          ),
+                        }}
+                      >
+                        {item.content}
+                      </ReactMarkdown>
+                    ) : (
+                      <p className="mb-2 whitespace-pre-wrap">{item.content}</p>
+                    )}
                     {item.role === "assistant" && item.sources.length > 0 && (
                       <p className="text-xs text-zinc-300">
                         Sources: {item.sources.join(", ")}
@@ -858,6 +890,16 @@ export default function Home() {
                     )}
                   </div>
                 ))}
+                {isAsking && (
+                  <div className="max-w-[90%] rounded-xl bg-zinc-800 px-4 py-3 text-sm text-zinc-200">
+                    <p className="mb-2 text-zinc-300">Thinking...</p>
+                    <div className="space-y-2">
+                      <div className="h-2 w-5/6 animate-pulse rounded bg-zinc-700" />
+                      <div className="h-2 w-2/3 animate-pulse rounded bg-zinc-700" />
+                      <div className="h-2 w-3/4 animate-pulse rounded bg-zinc-700" />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <form className="border-t border-zinc-800 p-4" onSubmit={handleAsk} ref={chatFormRef}>
@@ -1089,16 +1131,21 @@ export default function Home() {
           <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl">
             <p className="text-lg font-semibold text-zinc-100">Indexing project</p>
             <p className="mt-1 text-sm text-zinc-400">{indexJob?.stage || "Preparing..."}</p>
+            {indexJob?.currentFile && (
+              <p className="mt-1 truncate text-xs text-zinc-500" title={indexJob.currentFile}>
+                File: {indexJob.currentFile}
+              </p>
+            )}
             <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-zinc-800">
               <div
                 className="h-full rounded-full bg-emerald-500 transition-all duration-500"
                 style={{
                   width: `${indexJob && indexJob.scannedFiles > 0
-                      ? Math.max(
-                        8,
-                        Math.round((indexJob.processedFiles / indexJob.scannedFiles) * 100),
-                      )
-                      : 15
+                    ? Math.max(
+                      8,
+                      Math.round((indexJob.processedFiles / indexJob.scannedFiles) * 100),
+                    )
+                    : 15
                     }%`,
                 }}
               />
@@ -1109,9 +1156,14 @@ export default function Home() {
               <p>Changed: {indexJob?.changedFiles ?? 0}</p>
               <p>Chunks: {indexJob?.indexedChunks ?? 0}</p>
             </div>
+            {indexJob && indexJob.currentFileChunkTotal > 0 && (
+              <p className="mt-2 text-xs text-zinc-400">
+                Current file chunks: {indexJob.currentFileChunkIndex}/{indexJob.currentFileChunkTotal}
+              </p>
+            )}
             <div className="mt-3 flex items-center gap-2 text-xs text-zinc-500">
               <span className="inline-block h-2 w-2 animate-ping rounded-full bg-emerald-500" />
-              <span>Live progress updates every second.</span>
+              <span>Indexing your files. Please wait...</span>
             </div>
           </div>
         </div>
