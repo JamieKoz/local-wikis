@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { PDFParse } from "pdf-parse";
 import * as XLSX from "xlsx";
 
 export const SUPPORTED_EXTENSIONS = new Set([
@@ -10,6 +11,7 @@ export const SUPPORTED_EXTENSIONS = new Set([
   ".json",
   ".csv",
   ".xlsx",
+  ".pdf",
 ]);
 const IGNORED_DIRS = new Set(["node_modules", ".git"]);
 
@@ -18,22 +20,33 @@ export type ScannedFile = {
   content: string;
 };
 
-function readFileContent(absolutePath: string, ext: string): string {
-  if (ext !== ".xlsx") {
-    return fs.readFileSync(absolutePath, "utf8");
+async function readFileContent(absolutePath: string, ext: string): Promise<string> {
+  if (ext === ".xlsx") {
+    const fileBuffer = fs.readFileSync(absolutePath);
+    const workbook = XLSX.read(fileBuffer, { type: "buffer" });
+    const sheetTexts = workbook.SheetNames.map((sheetName) => {
+      const sheet = workbook.Sheets[sheetName];
+      const csv = XLSX.utils.sheet_to_csv(sheet);
+      return `# Sheet: ${sheetName}\n${csv}`;
+    });
+    return sheetTexts.join("\n\n");
   }
 
-  const fileBuffer = fs.readFileSync(absolutePath);
-  const workbook = XLSX.read(fileBuffer, { type: "buffer" });
-  const sheetTexts = workbook.SheetNames.map((sheetName) => {
-    const sheet = workbook.Sheets[sheetName];
-    const csv = XLSX.utils.sheet_to_csv(sheet);
-    return `# Sheet: ${sheetName}\n${csv}`;
-  });
-  return sheetTexts.join("\n\n");
+  if (ext === ".pdf") {
+    const fileBuffer = fs.readFileSync(absolutePath);
+    const parser = new PDFParse({ data: fileBuffer });
+    try {
+      const parsed = await parser.getText();
+      return parsed.text || "";
+    } finally {
+      await parser.destroy();
+    }
+  }
+
+  return fs.readFileSync(absolutePath, "utf8");
 }
 
-function walkDirectory(rootPath: string, currentPath: string, files: ScannedFile[]) {
+async function walkDirectory(rootPath: string, currentPath: string, files: ScannedFile[]) {
   const entries = fs.readdirSync(currentPath, { withFileTypes: true });
 
   for (const entry of entries) {
@@ -43,7 +56,7 @@ function walkDirectory(rootPath: string, currentPath: string, files: ScannedFile
       if (IGNORED_DIRS.has(entry.name)) {
         continue;
       }
-      walkDirectory(rootPath, absolutePath, files);
+      await walkDirectory(rootPath, absolutePath, files);
       continue;
     }
 
@@ -57,7 +70,7 @@ function walkDirectory(rootPath: string, currentPath: string, files: ScannedFile
     }
 
     try {
-      const content = readFileContent(absolutePath, ext);
+      const content = await readFileContent(absolutePath, ext);
       files.push({
         path: absolutePath.startsWith(rootPath) ? absolutePath : path.resolve(absolutePath),
         content,
@@ -68,7 +81,7 @@ function walkDirectory(rootPath: string, currentPath: string, files: ScannedFile
   }
 }
 
-export function scanFolder(folderPath: string): ScannedFile[] {
+export async function scanFolder(folderPath: string): Promise<ScannedFile[]> {
   const resolved = path.resolve(folderPath);
   const stats = fs.statSync(resolved);
   if (!stats.isDirectory()) {
@@ -76,6 +89,6 @@ export function scanFolder(folderPath: string): ScannedFile[] {
   }
 
   const files: ScannedFile[] = [];
-  walkDirectory(resolved, resolved, files);
+  await walkDirectory(resolved, resolved, files);
   return files;
 }

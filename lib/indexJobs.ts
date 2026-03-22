@@ -84,7 +84,7 @@ async function runIndexJob(jobId: string) {
 
   try {
     updateJob(jobId, { status: "running", stage: "Scanning files..." });
-    const files = scanFolder(current.folderPath);
+    const files = await scanFolder(current.folderPath);
     updateJob(jobId, {
       scannedFiles: files.length,
       stage: "Indexing files...",

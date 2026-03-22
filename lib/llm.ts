@@ -112,6 +112,28 @@ async function generateWithOpenAI(prompt: string, model: string): Promise<string
       }
     }
 
+    if (model === "gpt-5.4-nano" || model === "gpt-5.4-mini") {
+      const upscaleResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-5.4",
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.1,
+        }),
+      });
+      if (upscaleResponse.ok) {
+        const upscalePayload = (await upscaleResponse.json()) as ChatCompletionResponse;
+        const upscaleContent = upscalePayload.choices?.[0]?.message?.content?.trim();
+        if (upscaleContent && !isIDontKnow(upscaleContent)) {
+          return upscaleContent;
+        }
+      }
+    }
+
     return content;
   }
 
