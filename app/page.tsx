@@ -328,14 +328,11 @@ export default function Home() {
     }
 
     const picked = await window.electronAPI.pickFolder();
-    if (picked) {
+    if (picked.length > 0) {
       const existing = parseFolderPaths(folderPath);
-      if (existing.includes(picked)) {
-        setStatus("Folder already selected.");
-        return;
-      }
-      setFolderPath(existing.length === 0 ? picked : `${existing.join("\n")}\n${picked}`);
-      setStatus("Folder selected.");
+      const merged = Array.from(new Set([...existing, ...picked]));
+      setFolderPath(merged.join("\n"));
+      setStatus(picked.length > 1 ? `${picked.length} folders selected.` : "Folder selected.");
     }
   }
 
@@ -423,34 +420,41 @@ export default function Home() {
       return;
     }
 
-    let pickedFolder = "";
+    let pickedFolders: string[] = [];
     if (hasElectronPicker && window.electronAPI?.pickFolder) {
-      pickedFolder = (await window.electronAPI.pickFolder()) || "";
+      pickedFolders = await window.electronAPI.pickFolder();
     } else {
-      pickedFolder = window.prompt("Enter absolute folder path to add:")?.trim() || "";
+      const one = window.prompt("Enter absolute folder path to add:")?.trim() || "";
+      pickedFolders = one ? [one] : [];
     }
-    if (!pickedFolder) {
+    if (pickedFolders.length === 0) {
       return;
     }
 
     setIsLoading(true);
     try {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "add_folder",
-          projectId: selectedProjectId,
-          folderPath: pickedFolder,
-        }),
-      });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to add folder");
+      for (const pickedFolder of pickedFolders) {
+        const res = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "add_folder",
+            projectId: selectedProjectId,
+            folderPath: pickedFolder,
+          }),
+        });
+        const data = (await res.json()) as { error?: string };
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to add folder");
+        }
       }
       await loadProjects();
       await loadFiles(selectedProjectId);
-      setStatus("Folder added to project.");
+      setStatus(
+        pickedFolders.length > 1
+          ? `${pickedFolders.length} folders added to project.`
+          : "Folder added to project.",
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unknown error");
     } finally {
@@ -1263,7 +1267,7 @@ export default function Home() {
                   type="button"
                   onClick={handlePickFolder}
                 >
-                  Pick Folder
+                  Pick Folder(s)
                 </button>
                 <label className="flex items-center gap-2 text-xs text-zinc-300">
                   <input
@@ -1277,6 +1281,11 @@ export default function Home() {
               {!hasElectronPicker && (
                 <p className="text-xs text-amber-400">
                   Electron not detected here. Paste an absolute path or open Electron window.
+                </p>
+              )}
+              {hasElectronPicker && (
+                <p className="text-xs text-zinc-500">
+                  You can multi-select folders or files; files are mapped to their parent folder.
                 </p>
               )}
               <div className="flex justify-end gap-2 pt-2">

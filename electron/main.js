@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
+const fs = require("node:fs");
 const path = require("node:path");
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 
@@ -39,14 +40,28 @@ app.on("window-all-closed", () => {
 
 ipcMain.handle("pick-folder", async () => {
   const result = await dialog.showOpenDialog({
-    properties: ["openDirectory"],
+    properties: ["openFile", "openDirectory", "multiSelections"],
   });
 
   if (result.canceled || result.filePaths.length === 0) {
-    return null;
+    return [];
   }
 
-  return result.filePaths[0];
+  const folders = new Set();
+  for (const selectedPath of result.filePaths) {
+    try {
+      const stat = fs.statSync(selectedPath);
+      if (stat.isDirectory()) {
+        folders.add(path.resolve(selectedPath));
+      } else {
+        folders.add(path.dirname(path.resolve(selectedPath)));
+      }
+    } catch {
+      // Ignore paths we cannot stat.
+    }
+  }
+
+  return Array.from(folders);
 });
 
 if (!isDev) {
