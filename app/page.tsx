@@ -1,65 +1,992 @@
-import Image from "next/image";
+"use client";
+
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ChatMessage,
+  ChatSession,
+  LlmProvider,
+  Project,
+  ProjectFile,
+} from "@/lib/types";
+
+type SpreadsheetSheet = {
+  name: string;
+  rows: string[][];
+};
+
+type IndexJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  stage: string;
+  scannedFiles: number;
+  processedFiles: number;
+  changedFiles: number;
+  skippedFiles: number;
+  indexedChunks: number;
+  error?: string;
+};
+
+const MODEL_OPTIONS: Record<LlmProvider, string[]> = {
+  openai: ["gpt-5.4-mini", "gpt-5.4", "gpt-4.1"],
+  gemini: ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
+  perplexity: ["sonar", "sonar-pro"],
+};
 
 export default function Home() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [folderPath, setFolderPath] = useState("");
+  const [activeView, setActiveView] = useState<"chat" | "files">("chat");
+  const [message, setMessage] = useState("");
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([]);
+  const [selectedFilePath, setSelectedFilePath] = useState("");
+  const [fileContent, setFileContent] = useState("");
+  const [fileEditable, setFileEditable] = useState(false);
+  const [fileDirty, setFileDirty] = useState(false);
+  const [isFileLoading, setIsFileLoading] = useState(false);
+  const [spreadsheetSheets, setSpreadsheetSheets] = useState<SpreadsheetSheet[]>([]);
+  const [activeSheetIndex, setActiveSheetIndex] = useState(0);
+  const [pdfViewerUrl, setPdfViewerUrl] = useState("");
+  const [selectedProvider, setSelectedProvider] = useState<LlmProvider>("openai");
+  const [selectedModel, setSelectedModel] = useState("gpt-4o-mini");
+  const [customModel, setCustomModel] = useState("");
+  const [isModelSwitcherOpen, setIsModelSwitcherOpen] = useState(false);
+  const [isProviderDropdownOpen, setIsProviderDropdownOpen] = useState(false);
+  const [isIndexing, setIsIndexing] = useState(false);
+  const [indexJobId, setIndexJobId] = useState("");
+  const [indexJob, setIndexJob] = useState<IndexJob | null>(null);
+  const [hasElectronPicker, setHasElectronPicker] = useState(false);
+  const [status, setStatus] = useState<string>("");
+  const [isLoading, setIsLoading] = useState(false);
+
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  );
+
+  const selectedFile = useMemo(
+    () => projectFiles.find((file) => file.relativePath === selectedFilePath) ?? null,
+    [projectFiles, selectedFilePath],
+  );
+
+  const selectedSession = useMemo(
+    () => chatSessions.find((session) => session.id === selectedSessionId) ?? null,
+    [chatSessions, selectedSessionId],
+  );
+
+  const loadProjects = useCallback(async () => {
+    const res = await fetch("/api/projects");
+    const data = (await res.json()) as { projects: Project[] };
+    setProjects(data.projects || []);
+    if (!selectedProjectId && data.projects?.[0]) {
+      setSelectedProjectId(data.projects[0].id);
+    }
+  }, [selectedProjectId]);
+
+  const loadSessions = useCallback(async (projectId: string) => {
+    if (!projectId) {
+      setChatSessions([]);
+      setSelectedSessionId("");
+      return;
+    }
+    const res = await fetch(`/api/chat/sessions?projectId=${encodeURIComponent(projectId)}`);
+    const data = (await res.json()) as { sessions?: ChatSession[]; error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to load chat sessions");
+    }
+    const sessions = data.sessions || [];
+    setChatSessions(sessions);
+    if (sessions.length === 0) {
+      setSelectedSessionId("");
+      setChatHistory([]);
+      return;
+    }
+    if (!sessions.some((session) => session.id === selectedSessionId)) {
+      setSelectedSessionId(sessions[0].id);
+    }
+  }, [selectedSessionId]);
+
+  const loadHistory = useCallback(async (projectId: string, sessionId: string) => {
+    if (!projectId || !sessionId) {
+      setChatHistory([]);
+      return;
+    }
+
+    const res = await fetch(
+      `/api/chat?projectId=${encodeURIComponent(projectId)}&sessionId=${encodeURIComponent(sessionId)}`,
+    );
+    const data = (await res.json()) as { messages?: ChatMessage[]; error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to load chat history");
+    }
+    setChatHistory(data.messages || []);
+  }, []);
+
+  const loadFiles = useCallback(async (projectId: string) => {
+    if (!projectId) {
+      setProjectFiles([]);
+      return;
+    }
+
+    const res = await fetch(`/api/files?projectId=${encodeURIComponent(projectId)}`);
+    const data = (await res.json()) as { files?: ProjectFile[]; error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to load files");
+    }
+    const files = data.files || [];
+    setProjectFiles(files);
+
+    if (files.length === 0) {
+      setSelectedFilePath("");
+      setFileContent("");
+      setFileEditable(false);
+      setFileDirty(false);
+      setSpreadsheetSheets([]);
+      setActiveSheetIndex(0);
+      setPdfViewerUrl("");
+      return;
+    }
+
+    if (!files.some((file) => file.relativePath === selectedFilePath)) {
+      setSelectedFilePath(files[0].relativePath);
+    }
+  }, [selectedFilePath]);
+
+  const loadFileContent = useCallback(
+    async (projectId: string, filePath: string) => {
+      if (!projectId || !filePath) {
+        setFileContent("");
+        setFileEditable(false);
+        setFileDirty(false);
+        setSpreadsheetSheets([]);
+        setActiveSheetIndex(0);
+        setPdfViewerUrl("");
+        return;
+      }
+
+      setIsFileLoading(true);
+      try {
+        const extension = filePath.split(".").pop()?.toLowerCase();
+
+        if (extension === "pdf") {
+          setFileContent("");
+          setFileEditable(false);
+          setFileDirty(false);
+          setSpreadsheetSheets([]);
+          setActiveSheetIndex(0);
+          setPdfViewerUrl(
+            `/api/files/raw?projectId=${encodeURIComponent(projectId)}&filePath=${encodeURIComponent(filePath)}`,
+          );
+          return;
+        }
+
+        if (extension === "xlsx") {
+          const res = await fetch(
+            `/api/files/spreadsheet?projectId=${encodeURIComponent(projectId)}&filePath=${encodeURIComponent(filePath)}`,
+          );
+          const data = (await res.json()) as { sheets?: SpreadsheetSheet[]; error?: string };
+          if (!res.ok) {
+            throw new Error(data.error || "Failed to load spreadsheet");
+          }
+          setFileContent("");
+          setFileEditable(false);
+          setFileDirty(false);
+          setPdfViewerUrl("");
+          setSpreadsheetSheets(data.sheets || []);
+          setActiveSheetIndex(0);
+          return;
+        }
+
+        const res = await fetch(
+          `/api/files/content?projectId=${encodeURIComponent(projectId)}&filePath=${encodeURIComponent(filePath)}`,
+        );
+        const data = (await res.json()) as {
+          content?: string;
+          editable?: boolean;
+          error?: string;
+        };
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to load file");
+        }
+
+        setFileContent(data.content || "");
+        setFileEditable(Boolean(data.editable));
+        setFileDirty(false);
+        setSpreadsheetSheets([]);
+        setActiveSheetIndex(0);
+        setPdfViewerUrl("");
+      } finally {
+        setIsFileLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    setHasElectronPicker(Boolean(window.electronAPI?.pickFolder));
+  }, []);
+
+  useEffect(() => {
+    void loadProjects().catch((error) => {
+      setStatus(error instanceof Error ? error.message : "Failed to load projects");
+    });
+  }, [loadProjects]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setChatHistory([]);
+      setChatSessions([]);
+      setSelectedSessionId("");
+      setProjectFiles([]);
+      setSelectedFilePath("");
+      setFileContent("");
+      setFileEditable(false);
+      setFileDirty(false);
+      setSpreadsheetSheets([]);
+      setActiveSheetIndex(0);
+      setPdfViewerUrl("");
+      return;
+    }
+    void loadSessions(selectedProjectId).catch((error) => {
+      setStatus(error instanceof Error ? error.message : "Failed to load chat sessions");
+    });
+    void loadFiles(selectedProjectId).catch((error) => {
+      setStatus(error instanceof Error ? error.message : "Failed to load files");
+    });
+  }, [selectedProjectId, loadSessions, loadFiles]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !selectedSessionId) {
+      setChatHistory([]);
+      return;
+    }
+    void loadHistory(selectedProjectId, selectedSessionId).catch((error) => {
+      setStatus(error instanceof Error ? error.message : "Failed to load chat history");
+    });
+  }, [selectedProjectId, selectedSessionId, loadHistory]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !selectedFilePath) {
+      return;
+    }
+    void loadFileContent(selectedProjectId, selectedFilePath).catch((error) => {
+      setStatus(error instanceof Error ? error.message : "Failed to load file");
+    });
+  }, [selectedProjectId, selectedFilePath, loadFileContent]);
+
+  async function handlePickFolder() {
+    if (!hasElectronPicker || !window.electronAPI?.pickFolder) {
+      setStatus("Folder picker is available in Electron desktop mode only.");
+      return;
+    }
+
+    const picked = await window.electronAPI.pickFolder();
+    if (picked) {
+      setFolderPath(picked);
+      setStatus("Folder selected.");
+    }
+  }
+
+  const activeSheet = spreadsheetSheets[activeSheetIndex];
+
+  async function handleCreateProject(event: FormEvent) {
+    event.preventDefault();
+    setIsLoading(true);
+    setStatus("Creating project...");
+
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: projectName, folderPath }),
+      });
+      const data = (await res.json()) as { error?: string; project?: Project };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to create project");
+      }
+
+      setProjectName("");
+      setFolderPath("");
+      setChatHistory([]);
+      setStatus("Project created.");
+      await loadProjects();
+      if (data.project?.id) {
+        setSelectedProjectId(data.project.id);
+        await loadSessions(data.project.id);
+        await loadFiles(data.project.id);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleIndexProject() {
+    if (!selectedProjectId) {
+      setStatus("Select a project first.");
+      return;
+    }
+
+    setIsLoading(true);
+    setIsIndexing(true);
+    setIndexJob(null);
+    setIndexJobId("");
+    setStatus("Indexing files...");
+
+    try {
+      const res = await fetch("/api/index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: selectedProjectId }),
+      });
+      const data = (await res.json()) as { error?: string; job?: IndexJob };
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to index project");
+      }
+
+      if (!data.job) {
+        throw new Error("Index job did not start");
+      }
+      setIndexJobId(data.job.id);
+      setIndexJob(data.job);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+      setIsIndexing(false);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleCreateChatSession() {
+    if (!selectedProjectId) {
+      setStatus("Select a project first.");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch("/api/chat/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: selectedProjectId, title: "New chat" }),
+      });
+      const data = (await res.json()) as { session?: ChatSession; error?: string };
+      if (!res.ok || !data.session) {
+        throw new Error(data.error || "Failed to create chat session");
+      }
+      await loadSessions(selectedProjectId);
+      setSelectedSessionId(data.session.id);
+      setChatHistory([]);
+      setStatus("New chat created.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleAsk(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedProjectId) {
+      setStatus("Select a project first.");
+      return;
+    }
+    if (!message.trim()) {
+      setStatus("Enter a message first.");
+      return;
+    }
+
+    setIsLoading(true);
+    setStatus("Asking...");
+
+    try {
+      const userMessage = message;
+      setMessage("");
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: selectedProjectId,
+          sessionId: selectedSessionId || undefined,
+          message: userMessage,
+          provider: selectedProvider,
+          model: selectedModel === "__custom__" ? customModel.trim() : selectedModel,
+        }),
+      });
+      const data = (await res.json()) as { error?: string; sessionId?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "Chat failed");
+      }
+      if (data.sessionId) {
+        setSelectedSessionId(data.sessionId);
+      }
+      await loadSessions(selectedProjectId);
+      await loadHistory(selectedProjectId, data.sessionId || selectedSessionId);
+      setStatus("Done.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleSaveFile() {
+    if (!selectedProjectId || !selectedFilePath || !fileEditable) {
+      return;
+    }
+
+    setIsLoading(true);
+    setStatus("Saving file...");
+    try {
+      const res = await fetch("/api/files/content", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: selectedProjectId,
+          filePath: selectedFilePath,
+          content: fileContent,
+        }),
+      });
+      const data = (await res.json()) as { error?: string; reindexed?: boolean; chunks?: number };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to save file");
+      }
+      setFileDirty(false);
+      setStatus(
+        data.reindexed
+          ? `Saved and re-indexed (${data.chunks} chunks).`
+          : "Saved. No indexing changes detected.",
+      );
+      await loadFiles(selectedProjectId);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  function handleProviderChange(provider: LlmProvider) {
+    setSelectedProvider(provider);
+    setSelectedModel(MODEL_OPTIONS[provider][0]);
+    setCustomModel("");
+  }
+
+  useEffect(() => {
+    const storedProvider = localStorage.getItem("llm_provider") as LlmProvider | null;
+    const storedModel = localStorage.getItem("llm_model");
+    const storedCustom = localStorage.getItem("llm_custom_model");
+
+    if (storedProvider && MODEL_OPTIONS[storedProvider]) {
+      setSelectedProvider(storedProvider);
+    }
+    if (storedModel) {
+      setSelectedModel(storedModel);
+    }
+    if (storedCustom) {
+      setCustomModel(storedCustom);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("llm_provider", selectedProvider);
+    localStorage.setItem("llm_model", selectedModel);
+    localStorage.setItem("llm_custom_model", customModel);
+  }, [selectedProvider, selectedModel, customModel]);
+
+  useEffect(() => {
+    if (!isModelSwitcherOpen) {
+      setIsProviderDropdownOpen(false);
+    }
+  }, [isModelSwitcherOpen]);
+
+  useEffect(() => {
+    if (!isIndexing || !indexJobId || !selectedProjectId) {
+      return;
+    }
+    const timer = window.setInterval(async () => {
+      const res = await fetch(`/api/index?jobId=${encodeURIComponent(indexJobId)}`);
+      const data = (await res.json()) as { error?: string; job?: IndexJob };
+      if (!res.ok || !data.job) {
+        setStatus(data.error || "Failed to fetch indexing progress");
+        setIsIndexing(false);
+        return;
+      }
+
+      setIndexJob(data.job);
+      if (data.job.status === "completed") {
+        setIsIndexing(false);
+        setStatus(
+          `Indexed. scanned=${data.job.scannedFiles} changed=${data.job.changedFiles} skipped=${data.job.skippedFiles} chunks=${data.job.indexedChunks}`,
+        );
+        await loadFiles(selectedProjectId);
+      } else if (data.job.status === "failed") {
+        setIsIndexing(false);
+        setStatus(data.job.error || "Indexing failed");
+      }
+    }, 900);
+
+    return () => window.clearInterval(timer);
+  }, [isIndexing, indexJobId, selectedProjectId, loadFiles]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto grid h-full grid-cols-[320px_1fr] gap-4 p-4">
+        <aside className="flex h-full flex-col gap-4 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <h1 className="text-xl font-semibold">Local Wikis</h1>
+
+          <section className="space-y-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              Create Project
+            </h2>
+            <form className="flex flex-col gap-2" onSubmit={handleCreateProject}>
+              <input
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                placeholder="Project name"
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+              />
+              <input
+                className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                placeholder="/absolute/path/to/folder"
+                value={folderPath}
+                onChange={(event) => setFolderPath(event.target.value)}
+              />
+              <div className="flex gap-2">
+                <button
+                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm hover:bg-zinc-700"
+                  type="button"
+                  onClick={handlePickFolder}
+                >
+                  Pick Folder
+                </button>
+                <button
+                  className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium hover:bg-emerald-600 disabled:opacity-60"
+                  type="submit"
+                  disabled={isLoading || !projectName.trim() || !folderPath.trim()}
+                >
+                  Create
+                </button>
+              </div>
+              {!hasElectronPicker && (
+                <p className="text-xs text-amber-400">
+                  Electron not detected in this window. Paste an absolute path or open the Electron app window.
+                </p>
+              )}
+              <p className="truncate text-xs text-zinc-400">
+                {folderPath || "No folder selected"}
+              </p>
+            </form>
+          </section>
+
+          <section className="space-y-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              Projects
+            </h2>
+            <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
+              {projects.map((project) => {
+                const active = project.id === selectedProjectId;
+                return (
+                  <button
+                    key={project.id}
+                    className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${active
+                      ? "border-emerald-600 bg-emerald-900/30"
+                      : "border-zinc-700 bg-zinc-900 hover:bg-zinc-800"
+                      }`}
+                    onClick={() => setSelectedProjectId(project.id)}
+                    type="button"
+                  >
+                    <p className="font-medium">{project.name}</p>
+                    <p className="truncate text-xs text-zinc-400">{project.folderPath}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="flex min-h-0 flex-1 flex-col space-y-2">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                Chats
+              </h2>
+              <button
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                type="button"
+                onClick={handleCreateChatSession}
+                disabled={isLoading || !selectedProject}
+              >
+                New
+              </button>
+            </div>
+            <div className="space-y-1 overflow-y-auto pr-1">
+              {chatSessions.length === 0 && (
+                <p className="text-xs text-zinc-500">No chats yet.</p>
+              )}
+              {chatSessions.map((session) => {
+                const active = session.id === selectedSessionId;
+                return (
+                  <button
+                    key={session.id}
+                    type="button"
+                    onClick={() => setSelectedSessionId(session.id)}
+                    className={`w-full rounded-lg border p-2 text-left text-xs transition ${active
+                        ? "border-emerald-600 bg-emerald-900/25"
+                        : "border-zinc-800 bg-zinc-900 hover:bg-zinc-800"
+                      }`}
+                  >
+                    <p className="truncate font-medium text-zinc-200">{session.title}</p>
+                    <p className="mt-1 text-[10px] text-zinc-500">
+                      {new Date(session.updatedAt).toLocaleString()}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="space-y-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              Files
+            </h2>
+            <p className="text-xs text-zinc-500">
+              {selectedProject ? `${projectFiles.length} supported files` : "Select a project"}
+            </p>
+          </section>
+        </aside>
+
+        <section className="flex h-full flex-col rounded-2xl border border-zinc-800 bg-zinc-900/40">
+          <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
+            <div>
+              <h2 className="text-lg font-semibold">
+                {selectedProject ? selectedProject.name : "Select a project"}
+              </h2>
+              <p className="text-sm text-zinc-400">
+                {selectedProject?.folderPath || "No project selected"}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium hover:bg-blue-600 disabled:opacity-60"
+                onClick={handleIndexProject}
+                disabled={isLoading || !selectedProject}
+                type="button"
+              >
+                Index Project
+              </button>
+              <button
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700"
+                onClick={() => setIsModelSwitcherOpen((prev) => !prev)}
+                type="button"
+              >
+                {selectedProvider.toUpperCase()} -{" "}
+                {selectedModel === "__custom__" ? customModel || "custom model" : selectedModel}
+              </button>
+            </div>
+          </div>
+
+          {isModelSwitcherOpen && (
+            <div className="grid gap-4 border-b border-zinc-800 bg-zinc-900/60 px-5 py-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Provider
+                </p>
+                <div className="relative">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200"
+                    onClick={() => setIsProviderDropdownOpen((prev) => !prev)}
+                  >
+                    <span>{selectedProvider.toUpperCase()}</span>
+                    <span className="text-zinc-500">v</span>
+                  </button>
+                  {isProviderDropdownOpen && (
+                    <div className="absolute z-20 mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl">
+                      {(["openai", "gemini", "perplexity"] as LlmProvider[]).map((provider) => (
+                        <button
+                          key={provider}
+                          type="button"
+                          title={`Available: ${MODEL_OPTIONS[provider].join(", ")}`}
+                          className={`w-full rounded-md px-3 py-2 text-left text-xs ${selectedProvider === provider
+                              ? "bg-emerald-900/40 text-emerald-200"
+                              : "text-zinc-300 hover:bg-zinc-800"
+                            }`}
+                          onClick={() => {
+                            handleProviderChange(provider);
+                            setIsProviderDropdownOpen(false);
+                          }}
+                        >
+                          <p className="font-medium">{provider.toUpperCase()}</p>
+                          <p className="truncate text-[10px] text-zinc-500">
+                            {MODEL_OPTIONS[provider].join(", ")}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Model
+                </p>
+                <select
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                  value={selectedModel}
+                  onChange={(event) => setSelectedModel(event.target.value)}
+                >
+                  {MODEL_OPTIONS[selectedProvider].map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                  <option value="__custom__">Custom model...</option>
+                </select>
+                {selectedModel === "__custom__" && (
+                  <input
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                    placeholder="Enter custom model id"
+                    value={customModel}
+                    onChange={(event) => setCustomModel(event.target.value)}
+                  />
+                )}
+                <p className="text-xs text-zinc-400">
+                  API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `PERPLEXITY_API_KEY`
+                </p>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 border-b border-zinc-800 px-5 py-3">
+            <button
+              className={`rounded-lg px-3 py-1.5 text-sm ${activeView === "chat"
+                ? "bg-emerald-700 text-white"
+                : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+                }`}
+              onClick={() => setActiveView("chat")}
+              type="button"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+              Chat
+            </button>
+            <button
+              className={`rounded-lg px-3 py-1.5 text-sm ${activeView === "files"
+                ? "bg-emerald-700 text-white"
+                : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+                }`}
+              onClick={() => setActiveView("files")}
+              type="button"
             >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              Files
+            </button>
+          </div>
+
+          {activeView === "chat" ? (
+            <>
+              <div className="flex-1 space-y-3 overflow-y-auto p-5">
+                {selectedSession && (
+                  <p className="text-xs uppercase tracking-wide text-zinc-500">
+                    Chat: {selectedSession.title}
+                  </p>
+                )}
+                {chatHistory.length === 0 && (
+                  <p className="rounded-lg border border-dashed border-zinc-700 p-4 text-sm text-zinc-400">
+                    Ask a question to start the project conversation.
+                  </p>
+                )}
+                {chatHistory.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`max-w-[90%] rounded-xl px-4 py-3 text-sm ${item.role === "user"
+                      ? "ml-auto bg-emerald-800/60 text-zinc-100"
+                      : "bg-zinc-800 text-zinc-100"
+                      }`}
+                  >
+                    <p className="mb-2 whitespace-pre-wrap">{item.content}</p>
+                    {item.role === "assistant" && item.sources.length > 0 && (
+                      <p className="text-xs text-zinc-300">
+                        Sources: {item.sources.join(", ")}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <form className="border-t border-zinc-800 p-4" onSubmit={handleAsk}>
+                <div className="flex gap-3">
+                  <textarea
+                    className="min-h-16 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                    value={message}
+                    onChange={(event) => setMessage(event.target.value)}
+                    placeholder="Ask a question about your indexed files..."
+                  />
+                  <button
+                    className="h-fit rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium hover:bg-emerald-600 disabled:opacity-60"
+                    type="submit"
+                    disabled={isLoading || !selectedProject || !message.trim()}
+                  >
+                    Ask
+                  </button>
+                </div>
+              </form>
+            </>
+          ) : (
+            <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr]">
+              <div className="border-r border-zinc-800 p-3">
+                <div className="max-h-full space-y-1 overflow-y-auto">
+                  {projectFiles.length === 0 && (
+                    <p className="text-xs text-zinc-500">No supported files found.</p>
+                  )}
+                  {projectFiles.map((file) => {
+                    const active = file.relativePath === selectedFilePath;
+                    return (
+                      <button
+                        key={file.relativePath}
+                        className={`w-full rounded-lg border px-3 py-2 text-left text-sm ${active
+                          ? "border-emerald-600 bg-emerald-900/25"
+                          : "border-zinc-700 bg-zinc-900 hover:bg-zinc-800"
+                          }`}
+                        onClick={() => setSelectedFilePath(file.relativePath)}
+                        type="button"
+                      >
+                        <p className="truncate">{file.relativePath}</p>
+                        <p className="text-xs text-zinc-400">
+                          {file.editable ? "Editable" : "Read-only"}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex min-h-0 flex-col">
+                <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
+                  <p className="truncate text-sm text-zinc-300">
+                    {selectedFile?.relativePath || "Select a file"}
+                  </p>
+                  <button
+                    className="rounded-lg bg-emerald-700 px-3 py-1.5 text-sm hover:bg-emerald-600 disabled:opacity-60"
+                    type="button"
+                    onClick={handleSaveFile}
+                    disabled={!fileEditable || !fileDirty || isLoading || !selectedFile}
+                  >
+                    Save
+                  </button>
+                </div>
+                {isFileLoading ? (
+                  <p className="p-4 text-sm text-zinc-400">Loading file...</p>
+                ) : selectedFile?.extension === ".pdf" ? (
+                  pdfViewerUrl ? (
+                    <iframe
+                      className="h-full w-full bg-white"
+                      src={pdfViewerUrl}
+                      title={selectedFile.relativePath}
+                    />
+                  ) : (
+                    <p className="p-4 text-sm text-zinc-400">Preparing PDF viewer...</p>
+                  )
+                ) : selectedFile?.extension === ".xlsx" ? (
+                  <div className="flex h-full min-h-0 flex-col">
+                    <div className="flex gap-2 overflow-x-auto border-b border-zinc-800 px-3 py-2">
+                      {spreadsheetSheets.map((sheet, index) => (
+                        <button
+                          key={sheet.name}
+                          className={`rounded-md px-3 py-1 text-xs ${index === activeSheetIndex
+                            ? "bg-emerald-700 text-white"
+                            : "bg-zinc-800 text-zinc-300"
+                            }`}
+                          onClick={() => setActiveSheetIndex(index)}
+                          type="button"
+                        >
+                          {sheet.name}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-auto">
+                      {activeSheet ? (
+                        <table className="min-w-full border-collapse text-xs">
+                          <tbody>
+                            {activeSheet.rows.map((row, rowIndex) => (
+                              <tr key={`${activeSheet.name}-${rowIndex}`}>
+                                {row.map((cell, cellIndex) => (
+                                  <td
+                                    key={`${activeSheet.name}-${rowIndex}-${cellIndex}`}
+                                    className="border border-zinc-800 px-2 py-1 align-top"
+                                  >
+                                    {cell}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <p className="p-4 text-sm text-zinc-400">No sheets found in workbook.</p>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <textarea
+                    className="h-full w-full resize-none bg-zinc-950 p-4 font-mono text-sm text-zinc-100 outline-none"
+                    value={fileContent}
+                    onChange={(event) => {
+                      setFileContent(event.target.value);
+                      setFileDirty(true);
+                    }}
+                    readOnly={!fileEditable}
+                    placeholder={
+                      selectedFile
+                        ? fileEditable
+                          ? "Edit file content..."
+                          : "This file type is read-only here."
+                        : "Select a file to preview."
+                    }
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-lg border border-zinc-800 bg-zinc-900/95 px-4 py-2 text-xs text-zinc-300 shadow-lg">
+        {status || "Ready"}
+      </div>
+      {isIndexing && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl">
+            <p className="text-lg font-semibold text-zinc-100">Indexing project</p>
+            <p className="mt-1 text-sm text-zinc-400">{indexJob?.stage || "Preparing..."}</p>
+            <div className="mt-4 h-2 w-full overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                style={{
+                  width: `${indexJob && indexJob.scannedFiles > 0
+                      ? Math.max(
+                        8,
+                        Math.round((indexJob.processedFiles / indexJob.scannedFiles) * 100),
+                      )
+                      : 15
+                    }%`,
+                }}
+              />
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-2 text-xs text-zinc-400">
+              <p>Processed: {indexJob?.processedFiles ?? 0}</p>
+              <p>Total: {indexJob?.scannedFiles ?? 0}</p>
+              <p>Changed: {indexJob?.changedFiles ?? 0}</p>
+              <p>Chunks: {indexJob?.indexedChunks ?? 0}</p>
+            </div>
+            <div className="mt-3 flex items-center gap-2 text-xs text-zinc-500">
+              <span className="inline-block h-2 w-2 animate-ping rounded-full bg-emerald-500" />
+              <span>Live progress updates every second.</span>
+            </div>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      )}
+    </main>
   );
 }
