@@ -40,7 +40,10 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = message.includes("ENOENT") ? 404 : 500;
+    const cleanMessage =
+      status === 404 ? "File not found in selected project folders" : message;
+    return NextResponse.json({ error: cleanMessage }, { status });
   }
 }
 
@@ -83,6 +86,9 @@ export async function PUT(request: Request) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = message.includes("ENOENT") ? 404 : 500;
+    const cleanMessage =
+      status === 404 ? "File not found in selected project folders" : message;
+    return NextResponse.json({ error: cleanMessage }, { status });
   }
 }

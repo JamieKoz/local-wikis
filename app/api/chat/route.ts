@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { addChatMessage, createChatSession, getChatMessages, getProjectChunks } from "@/lib/db";
 import { embedText } from "@/lib/embedding";
 import { generateAnswer } from "@/lib/llm";
-import { LlmProvider } from "@/lib/types";
+import { LlmProvider, RetrievalMode } from "@/lib/types";
 import { rankChunks } from "@/lib/vector";
 
 export const runtime = "nodejs";
@@ -34,12 +34,14 @@ export async function POST(request: Request) {
       message?: string;
       provider?: LlmProvider;
       model?: string;
+      retrievalMode?: RetrievalMode;
     };
     const projectId = body.projectId?.trim();
     let sessionId = body.sessionId?.trim();
     const message = body.message?.trim();
     const provider = body.provider || "openai";
     const model = body.model?.trim();
+    const retrievalMode = body.retrievalMode || "balanced";
 
     if (!projectId || !message) {
       return NextResponse.json(
@@ -104,7 +106,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const topChunks = rankChunks(queryEmbedding, projectChunks, 5);
+    const topChunks = rankChunks(queryEmbedding, projectChunks, 5, retrievalMode);
     const answer = await generateAnswer(
       message,
       topChunks.map((chunk) => chunk.content),
@@ -134,6 +136,7 @@ export async function POST(request: Request) {
       provider,
       model,
       sessionId,
+      retrievalMode,
       reason: topChunks.length === 0 ? "no_retrieved_chunks" : "ok",
     });
   } catch (error) {

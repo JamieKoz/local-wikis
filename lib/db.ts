@@ -508,6 +508,7 @@ export function getChatMessages(projectId: string, sessionId?: string): ChatMess
   return rows.map((row) => ({
     id: row.id,
     projectId: row.project_id,
+    sessionId: row.session_id || undefined,
     role: row.role,
     content: row.content,
     sources: JSON.parse(row.sources) as string[],

@@ -53,6 +53,7 @@ export const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",
 ]);
 const IGNORED_DIRS = new Set(["node_modules", ".git"]);
+const IGNORED_SUBPATHS = new Set(["extracted/pdfs"]);
 
 export type ScannedFile = {
   path: string;
@@ -90,9 +91,13 @@ async function walkDirectory(rootPath: string, currentPath: string, files: Scann
 
   for (const entry of entries) {
     const absolutePath = path.join(currentPath, entry.name);
+    const relativeDirPath = path
+      .relative(rootPath, absolutePath)
+      .replace(/\\/g, "/")
+      .toLowerCase();
 
     if (entry.isDirectory()) {
-      if (IGNORED_DIRS.has(entry.name)) {
+      if (IGNORED_DIRS.has(entry.name) || IGNORED_SUBPATHS.has(relativeDirPath)) {
         continue;
       }
       await walkDirectory(rootPath, absolutePath, files);

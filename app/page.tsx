@@ -9,6 +9,7 @@ import {
   LlmProvider,
   Project,
   ProjectFile,
+  RetrievalMode,
 } from "@/lib/types";
 
 type SpreadsheetSheet = {
@@ -39,6 +40,12 @@ const MODEL_OPTIONS: Record<LlmProvider, string[]> = {
   perplexity: ["sonar", "sonar-pro"],
 };
 
+const RETRIEVAL_MODE_OPTIONS: Array<{ value: RetrievalMode; label: string }> = [
+  { value: "balanced", label: "Balanced" },
+  { value: "notes_first", label: "Notes-first" },
+  { value: "evidence_first", label: "Evidence-first" },
+];
+
 export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -61,6 +68,7 @@ export default function Home() {
   const [selectedProvider, setSelectedProvider] = useState<LlmProvider>("openai");
   const [selectedModel, setSelectedModel] = useState(MODEL_OPTIONS.openai[0]);
   const [customModel, setCustomModel] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("balanced");
   const [isModelSwitcherOpen, setIsModelSwitcherOpen] = useState(false);
   const [isProviderDropdownOpen, setIsProviderDropdownOpen] = useState(false);
   const [llmAvailability, setLlmAvailability] = useState<LlmAvailability>({
@@ -69,6 +77,8 @@ export default function Home() {
     perplexity: false,
   });
   const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
+  const [isCreateNoteModalOpen, setIsCreateNoteModalOpen] = useState(false);
+  const [newNoteTitle, setNewNoteTitle] = useState("");
   const [createShouldIndex, setCreateShouldIndex] = useState(true);
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexJobId, setIndexJobId] = useState("");
@@ -110,10 +120,13 @@ export default function Home() {
     const res = await fetch("/api/projects");
     const data = (await res.json()) as { projects: Project[] };
     setProjects(data.projects || []);
-    if (!selectedProjectId && data.projects?.[0]) {
-      setSelectedProjectId(data.projects[0].id);
-    }
-  }, [selectedProjectId]);
+    setSelectedProjectId((prev) => {
+      if (prev) {
+        return prev;
+      }
+      return data.projects?.[0]?.id || "";
+    });
+  }, []);
 
   const loadSessions = useCallback(async (projectId: string) => {
     if (!projectId) {
@@ -133,10 +146,10 @@ export default function Home() {
       setChatHistory([]);
       return;
     }
-    if (!sessions.some((session) => session.id === selectedSessionId)) {
-      setSelectedSessionId(sessions[0].id);
-    }
-  }, [selectedSessionId]);
+    setSelectedSessionId((prev) =>
+      sessions.some((session) => session.id === prev) ? prev : sessions[0].id,
+    );
+  }, []);
 
   const loadHistory = useCallback(async (projectId: string, sessionId: string) => {
     if (!projectId || !sessionId) {
@@ -179,10 +192,10 @@ export default function Home() {
       return;
     }
 
-    if (!files.some((file) => file.relativePath === selectedFilePath)) {
-      setSelectedFilePath(files[0].relativePath);
-    }
-  }, [selectedFilePath]);
+    setSelectedFilePath((prev) =>
+      files.some((file) => file.relativePath === prev) ? prev : files[0].relativePath,
+    );
+  }, []);
 
   const loadFileContent = useCallback(
     async (projectId: string, filePath: string) => {
@@ -294,6 +307,15 @@ export default function Home() {
       setPdfViewerUrl("");
       return;
     }
+    // Reset file selection immediately when switching projects to avoid stale path lookups.
+    setSelectedFilePath("");
+    setFileContent("");
+    setFileEditable(false);
+    setFileDirty(false);
+    setSpreadsheetSheets([]);
+    setActiveSheetIndex(0);
+    setPdfViewerUrl("");
+
     void loadSessions(selectedProjectId).catch((error) => {
       setStatus(error instanceof Error ? error.message : "Failed to load chat sessions");
     });
@@ -606,6 +628,7 @@ export default function Home() {
           message: userMessage,
           provider: selectedProvider,
           model: selectedModel === "__custom__" ? customModel.trim() : selectedModel,
+          retrievalMode,
         }),
       });
       const data = (await res.json()) as {
@@ -625,7 +648,10 @@ export default function Home() {
       if (data.reason === "no_indexed_chunks" || (data.chunksUsed ?? 0) === 0) {
         setStatus("No indexed context found for this project. Try Re-index Project first.");
       } else {
-        setStatus(`Done. Retrieved ${data.chunksUsed} context chunks.`);
+        const modeLabel =
+          RETRIEVAL_MODE_OPTIONS.find((option) => option.value === retrievalMode)?.label ||
+          "Balanced";
+        setStatus(`Done. Retrieved ${data.chunksUsed} context chunks (${modeLabel}).`);
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unknown error");
@@ -670,6 +696,77 @@ export default function Home() {
     }
   }
 
+  async function handleCreateNote(event?: FormEvent) {
+    event?.preventDefault();
+    if (!selectedProjectId) {
+      setStatus("Select a project first.");
+      return;
+    }
+
+    const title = newNoteTitle.trim();
+    if (!title) {
+      setStatus("Enter a note title first.");
+      return;
+    }
+
+    const datePrefix = new Date().toISOString().slice(0, 10);
+    const baseSlug =
+      title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 50) || "note";
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const targetPath = `notes/${datePrefix}-${baseSlug}-${suffix}.md`;
+    const template = `# ${title}
+
+## Context
+
+## Notes
+
+## Decisions
+
+## Open Questions
+`;
+
+    setIsLoading(true);
+    setStatus("Creating note...");
+    try {
+      const res = await fetch("/api/files/content", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: selectedProjectId,
+          filePath: targetPath,
+          content: template,
+        }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to create note");
+      }
+
+      const filesRes = await fetch(`/api/files?projectId=${encodeURIComponent(selectedProjectId)}`);
+      const filesData = (await filesRes.json()) as { files?: ProjectFile[]; error?: string };
+      if (!filesRes.ok) {
+        throw new Error(filesData.error || "Failed to refresh file list");
+      }
+      const refreshedFiles = filesData.files || [];
+      setProjectFiles(refreshedFiles);
+      setActiveView("files");
+      const exact = refreshedFiles.find((file) => file.relativePath === targetPath);
+      const match = refreshedFiles.find((file) => file.relativePath.endsWith(`/${targetPath}`));
+      setSelectedFilePath(exact?.relativePath || match?.relativePath || targetPath);
+      setIsCreateNoteModalOpen(false);
+      setNewNoteTitle("");
+      setStatus("Note created and indexed.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   function handleProviderChange(provider: LlmProvider) {
     setSelectedProvider(provider);
     setSelectedModel(MODEL_OPTIONS[provider][0]);
@@ -680,6 +777,7 @@ export default function Home() {
     const storedProvider = localStorage.getItem("llm_provider") as LlmProvider | null;
     const storedModel = localStorage.getItem("llm_model");
     const storedCustom = localStorage.getItem("llm_custom_model");
+    const storedRetrievalMode = localStorage.getItem("retrieval_mode") as RetrievalMode | null;
 
     if (storedProvider && MODEL_OPTIONS[storedProvider]) {
       setSelectedProvider(storedProvider);
@@ -690,13 +788,20 @@ export default function Home() {
     if (storedCustom) {
       setCustomModel(storedCustom);
     }
+    if (
+      storedRetrievalMode &&
+      RETRIEVAL_MODE_OPTIONS.some((option) => option.value === storedRetrievalMode)
+    ) {
+      setRetrievalMode(storedRetrievalMode);
+    }
   }, []);
 
   useEffect(() => {
     localStorage.setItem("llm_provider", selectedProvider);
     localStorage.setItem("llm_model", selectedModel);
     localStorage.setItem("llm_custom_model", customModel);
-  }, [selectedProvider, selectedModel, customModel]);
+    localStorage.setItem("retrieval_mode", retrievalMode);
+  }, [selectedProvider, selectedModel, customModel, retrievalMode]);
 
   useEffect(() => {
     if (!isModelSwitcherOpen) {
@@ -890,6 +995,14 @@ export default function Home() {
                 Add Folder
               </button>
               <button
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-60"
+                onClick={() => setIsCreateNoteModalOpen(true)}
+                disabled={isLoading || !selectedProject}
+                type="button"
+              >
+                Create Note
+              </button>
+              <button
                 className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700"
                 onClick={() => setIsModelSwitcherOpen((prev) => !prev)}
                 type="button"
@@ -901,7 +1014,7 @@ export default function Home() {
           </div>
 
           {isModelSwitcherOpen && (
-            <div className="grid gap-4 border-b border-zinc-800 bg-zinc-900/60 px-5 py-4 md:grid-cols-2">
+            <div className="grid gap-4 border-b border-zinc-800 bg-zinc-900/60 px-5 py-4 md:grid-cols-3">
               <div className="space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
                   Provider
@@ -974,6 +1087,26 @@ export default function Home() {
                     Missing key for {selectedProvider}. Add it to `.env.local` and restart.
                   </p>
                 )}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Retrieval mode
+                </p>
+                <select
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                  value={retrievalMode}
+                  onChange={(event) => setRetrievalMode(event.target.value as RetrievalMode)}
+                >
+                  {RETRIEVAL_MODE_OPTIONS.map((mode) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-400">
+                  Notes-first boosts markdown summaries, Evidence-first boosts raw files.
+                </p>
               </div>
             </div>
           )}
@@ -1229,6 +1362,58 @@ export default function Home() {
           )}
         </section>
       </div>
+      {isCreateNoteModalOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-zinc-100">Create Note</h3>
+                <p className="text-sm text-zinc-400">
+                  A markdown note will be created in the `notes/` folder and indexed immediately.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                onClick={() => {
+                  setIsCreateNoteModalOpen(false);
+                  setNewNoteTitle("");
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <form className="space-y-3" onSubmit={handleCreateNote}>
+              <input
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-emerald-500 focus:ring"
+                placeholder="Note title (e.g. Weekly check-in)"
+                value={newNoteTitle}
+                onChange={(event) => setNewNoteTitle(event.target.value)}
+                autoFocus
+              />
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+                  onClick={() => {
+                    setIsCreateNoteModalOpen(false);
+                    setNewNoteTitle("");
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:opacity-60"
+                  disabled={isLoading || !newNoteTitle.trim() || !selectedProject}
+                >
+                  Create Note
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       {isCreateProjectModalOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">

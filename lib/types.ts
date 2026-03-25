@@ -7,6 +7,7 @@ export type Project = {
 };
 
 export type LlmProvider = "openai" | "gemini" | "perplexity";
+export type RetrievalMode = "balanced" | "notes_first" | "evidence_first";
 
 export type ChatSession = {
   id: string;
@@ -19,6 +20,7 @@ export type ChatSession = {
 export type ChatMessage = {
   id: string;
   projectId: string;
+  sessionId?: string;
   role: "user" | "assistant";
   content: string;
   sources: string[];

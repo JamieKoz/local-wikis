@@ -99,6 +99,7 @@ const BROWSABLE_EXTENSIONS = new Set([
   ".pdf",
 ]);
 const IGNORED_DIRS = new Set(["node_modules", ".git"]);
+const IGNORED_SUBPATHS = new Set(["extracted/pdfs"]);
 
 export type ProjectFile = {
   path: string;
@@ -156,7 +157,11 @@ export function listProjectFiles(projectRoots: string[]): ProjectFile[] {
       const absolutePath = path.join(currentPath, entry.name);
 
       if (entry.isDirectory()) {
-        if (IGNORED_DIRS.has(entry.name)) {
+        const relativeDirPath = path
+          .relative(root, absolutePath)
+          .replace(/\\/g, "/")
+          .toLowerCase();
+        if (IGNORED_DIRS.has(entry.name) || IGNORED_SUBPATHS.has(relativeDirPath)) {
           continue;
         }
         walk(root, absolutePath);
@@ -256,6 +261,7 @@ export function writeTextProjectFile(projectRoots: string | string[], targetPath
   if (!isEditableExtension(fullPath)) {
     throw new Error("This file type is read-only in the editor");
   }
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
   fs.writeFileSync(fullPath, content, "utf8");
   return fullPath;
 }
