@@ -53,11 +53,45 @@ export const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",
 ]);
 const IGNORED_DIRS = new Set(["node_modules", ".git"]);
-const IGNORED_SUBPATHS = new Set(["extracted/pdfs"]);
+let pdfWorkerSetupPromise: Promise<void> | null = null;
+
+async function ensurePdfWorkerConfigured() {
+  if (!pdfWorkerSetupPromise) {
+    pdfWorkerSetupPromise = (async () => {
+      const globalWorker = globalThis as { pdfjsWorker?: { WorkerMessageHandler?: unknown } };
+      if (globalWorker.pdfjsWorker?.WorkerMessageHandler) {
+        return;
+      }
+      try {
+        globalWorker.pdfjsWorker = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+        return;
+      } catch {
+        // fall back to non-legacy worker path when legacy bundle is unavailable
+      }
+      try {
+        globalWorker.pdfjsWorker = await import("pdfjs-dist/build/pdf.worker.mjs");
+      } catch {
+        // Keep best-effort behavior; parser may still work in some runtimes.
+      }
+    })();
+  }
+  await pdfWorkerSetupPromise;
+}
 
 export type ScannedFile = {
   path: string;
   content: string;
+};
+
+export type ScanFailure = {
+  path: string;
+  reason: string;
+};
+
+export type ScanResult = {
+  files: ScannedFile[];
+  matchedFiles: number;
+  failedFiles: ScanFailure[];
 };
 
 async function readFileContent(absolutePath: string, ext: string): Promise<string> {
@@ -73,8 +107,9 @@ async function readFileContent(absolutePath: string, ext: string): Promise<strin
   }
 
   if (ext === ".pdf") {
+    await ensurePdfWorkerConfigured();
     const fileBuffer = fs.readFileSync(absolutePath);
-    const parser = new PDFParse({ data: fileBuffer });
+    const parser = new PDFParse({ data: fileBuffer, disableWorker: true });
     try {
       const parsed = await parser.getText();
       return parsed.text || "";
@@ -86,21 +121,23 @@ async function readFileContent(absolutePath: string, ext: string): Promise<strin
   return fs.readFileSync(absolutePath, "utf8");
 }
 
-async function walkDirectory(rootPath: string, currentPath: string, files: ScannedFile[]) {
+async function walkDirectory(
+  rootPath: string,
+  currentPath: string,
+  files: ScannedFile[],
+  failedFiles: ScanFailure[],
+): Promise<number> {
   const entries = fs.readdirSync(currentPath, { withFileTypes: true });
+  let matchedFiles = 0;
 
   for (const entry of entries) {
     const absolutePath = path.join(currentPath, entry.name);
-    const relativeDirPath = path
-      .relative(rootPath, absolutePath)
-      .replace(/\\/g, "/")
-      .toLowerCase();
 
     if (entry.isDirectory()) {
-      if (IGNORED_DIRS.has(entry.name) || IGNORED_SUBPATHS.has(relativeDirPath)) {
+      if (IGNORED_DIRS.has(entry.name)) {
         continue;
       }
-      await walkDirectory(rootPath, absolutePath, files);
+      matchedFiles += await walkDirectory(rootPath, absolutePath, files, failedFiles);
       continue;
     }
 
@@ -112,6 +149,7 @@ async function walkDirectory(rootPath: string, currentPath: string, files: Scann
     if (!SUPPORTED_EXTENSIONS.has(ext)) {
       continue;
     }
+    matchedFiles += 1;
 
     try {
       const content = await readFileContent(absolutePath, ext);
@@ -119,13 +157,19 @@ async function walkDirectory(rootPath: string, currentPath: string, files: Scann
         path: absolutePath.startsWith(rootPath) ? absolutePath : path.resolve(absolutePath),
         content,
       });
-    } catch {
-      // Skip unreadable files to keep indexing resilient.
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown read error";
+      failedFiles.push({
+        path: absolutePath.startsWith(rootPath) ? absolutePath : path.resolve(absolutePath),
+        reason,
+      });
     }
   }
+
+  return matchedFiles;
 }
 
-export async function scanFolder(folderPath: string): Promise<ScannedFile[]> {
+export async function scanFolder(folderPath: string): Promise<ScanResult> {
   const resolved = path.resolve(folderPath);
   const stats = fs.statSync(resolved);
   if (!stats.isDirectory()) {
@@ -133,6 +177,11 @@ export async function scanFolder(folderPath: string): Promise<ScannedFile[]> {
   }
 
   const files: ScannedFile[] = [];
-  await walkDirectory(resolved, resolved, files);
-  return files;
+  const failedFiles: ScanFailure[] = [];
+  const matchedFiles = await walkDirectory(resolved, resolved, files, failedFiles);
+  return {
+    files,
+    matchedFiles,
+    failedFiles,
+  };
 }

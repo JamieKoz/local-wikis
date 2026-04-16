@@ -99,7 +99,6 @@ const BROWSABLE_EXTENSIONS = new Set([
   ".pdf",
 ]);
 const IGNORED_DIRS = new Set(["node_modules", ".git"]);
-const IGNORED_SUBPATHS = new Set(["extracted/pdfs"]);
 
 export type ProjectFile = {
   path: string;
@@ -157,11 +156,7 @@ export function listProjectFiles(projectRoots: string[]): ProjectFile[] {
       const absolutePath = path.join(currentPath, entry.name);
 
       if (entry.isDirectory()) {
-        const relativeDirPath = path
-          .relative(root, absolutePath)
-          .replace(/\\/g, "/")
-          .toLowerCase();
-        if (IGNORED_DIRS.has(entry.name) || IGNORED_SUBPATHS.has(relativeDirPath)) {
+        if (IGNORED_DIRS.has(entry.name)) {
           continue;
         }
         walk(root, absolutePath);

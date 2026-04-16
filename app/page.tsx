@@ -25,11 +25,13 @@ type IndexJob = {
   processedFiles: number;
   changedFiles: number;
   skippedFiles: number;
+  failedFiles: number;
   indexedChunks: number;
   currentFile: string;
   currentFileChunkIndex: number;
   currentFileChunkTotal: number;
   error?: string;
+  warning?: string;
 };
 
 type LlmAvailability = Record<LlmProvider, boolean>;
@@ -826,7 +828,7 @@ export default function Home() {
       if (data.job.status === "completed") {
         setIsIndexing(false);
         setStatus(
-          `Indexed. scanned=${data.job.scannedFiles} changed=${data.job.changedFiles} skipped=${data.job.skippedFiles} chunks=${data.job.indexedChunks}`,
+          `Indexed. scanned=${data.job.scannedFiles} changed=${data.job.changedFiles} skipped=${data.job.skippedFiles} failed=${data.job.failedFiles} chunks=${data.job.indexedChunks}${data.job.warning ? ` | ${data.job.warning}` : ""}`,
         );
         await loadFiles(indexingProjectId);
       } else if (data.job.status === "failed") {
@@ -1521,8 +1523,14 @@ export default function Home() {
               <p>Processed: {indexJob?.processedFiles ?? 0}</p>
               <p>Total: {indexJob?.scannedFiles ?? 0}</p>
               <p>Changed: {indexJob?.changedFiles ?? 0}</p>
+              <p>Failed: {indexJob?.failedFiles ?? 0}</p>
               <p>Chunks: {indexJob?.indexedChunks ?? 0}</p>
             </div>
+            {indexJob?.warning && (
+              <p className="mt-2 text-xs text-amber-300" title={indexJob.warning}>
+                {indexJob.warning}
+              </p>
+            )}
             {indexJob && indexJob.currentFileChunkTotal > 0 && (
               <p className="mt-2 text-xs text-zinc-400">
                 Current file chunks: {indexJob.currentFileChunkIndex}/{indexJob.currentFileChunkTotal}

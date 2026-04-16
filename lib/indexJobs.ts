@@ -16,6 +16,7 @@ export type IndexJob = {
   processedFiles: number;
   changedFiles: number;
   skippedFiles: number;
+  failedFiles: number;
   indexedChunks: number;
   currentFile: string;
   currentFileChunkIndex: number;
@@ -23,6 +24,7 @@ export type IndexJob = {
   startedAt: string;
   completedAt?: string;
   error?: string;
+  warning?: string;
 };
 
 const jobs = new Map<string, IndexJob>();
@@ -67,6 +69,7 @@ export function createIndexJob(projectId: string, inputFolderPath?: string): Ind
     processedFiles: 0,
     changedFiles: 0,
     skippedFiles: 0,
+    failedFiles: 0,
     indexedChunks: 0,
     currentFile: "",
     currentFileChunkIndex: 0,
@@ -87,10 +90,18 @@ async function runIndexJob(jobId: string, folderPaths: string[]) {
 
   try {
     updateJob(jobId, { status: "running", stage: "Scanning files..." });
-    const allFiles = await Promise.all(folderPaths.map((folderPath) => scanFolder(folderPath)));
-    const files = allFiles.flat();
+    const allScans = await Promise.all(folderPaths.map((folderPath) => scanFolder(folderPath)));
+    const files = allScans.flatMap((scan) => scan.files);
+    const scannedFiles = allScans.reduce((sum, scan) => sum + scan.matchedFiles, 0);
+    const failedScans = allScans.flatMap((scan) => scan.failedFiles);
+    const warning =
+      failedScans.length > 0
+        ? `Failed to read ${failedScans.length} file(s). Example: ${failedScans[0].path} — ${failedScans[0].reason}`
+        : undefined;
     updateJob(jobId, {
-      scannedFiles: files.length,
+      scannedFiles,
+      failedFiles: failedScans.length,
+      warning,
       stage: "Indexing files...",
     });
 
@@ -151,10 +162,16 @@ async function runIndexJob(jobId: string, folderPaths: string[]) {
 
     updateJob(jobId, {
       status: "completed",
-      stage: "Completed",
+      stage:
+        scannedFiles === 0
+          ? "Completed (no supported files found)"
+          : failedScans.length > 0
+            ? "Completed (with read failures)"
+            : "Completed",
       processedFiles,
       changedFiles,
       skippedFiles,
+      failedFiles: failedScans.length,
       indexedChunks,
       currentFile: "",
       currentFileChunkIndex: 0,
