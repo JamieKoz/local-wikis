@@ -91,6 +91,9 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isAsking, setIsAsking] = useState(false);
   const chatFormRef = useRef<HTMLFormElement | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const pendingSmoothScrollRef = useRef(false);
 
   function parseFolderPaths(input: string): string[] {
     return Array.from(
@@ -117,6 +120,13 @@ export default function Home() {
     () => chatSessions.find((session) => session.id === selectedSessionId) ?? null,
     [chatSessions, selectedSessionId],
   );
+
+  const scrollToChatBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    if (!chatScrollRef.current || !chatBottomRef.current) {
+      return;
+    }
+    chatBottomRef.current.scrollIntoView({ behavior, block: "end" });
+  }, []);
 
   const loadProjects = useCallback(async () => {
     const res = await fetch("/api/projects");
@@ -335,6 +345,24 @@ export default function Home() {
       setStatus(error instanceof Error ? error.message : "Failed to load chat history");
     });
   }, [selectedProjectId, selectedSessionId, loadHistory]);
+
+  useEffect(() => {
+    if (!selectedSessionId || activeView !== "chat") {
+      return;
+    }
+    pendingSmoothScrollRef.current = false;
+    // Ensure switching chats lands on the latest message.
+    scrollToChatBottom("auto");
+  }, [selectedSessionId, activeView, scrollToChatBottom]);
+
+  useEffect(() => {
+    if (activeView !== "chat") {
+      return;
+    }
+    const behavior = pendingSmoothScrollRef.current ? "smooth" : "auto";
+    scrollToChatBottom(behavior);
+    pendingSmoothScrollRef.current = false;
+  }, [chatHistory, isAsking, activeView, scrollToChatBottom]);
 
   useEffect(() => {
     if (!selectedProjectId || !selectedFilePath) {
@@ -616,6 +644,7 @@ export default function Home() {
 
     setIsLoading(true);
     setIsAsking(true);
+    pendingSmoothScrollRef.current = true;
     setStatus("Asking...");
 
     try {
@@ -1143,7 +1172,7 @@ export default function Home() {
 
           {activeView === "chat" ? (
             <>
-              <div className="flex-1 space-y-3 overflow-y-auto p-5">
+              <div className="flex-1 space-y-3 overflow-y-auto p-5" ref={chatScrollRef}>
                 {selectedSession && (
                   <p className="text-xs uppercase tracking-wide text-zinc-500">
                     Chat: {selectedSession.title}
@@ -1212,6 +1241,7 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+                <div ref={chatBottomRef} />
               </div>
 
               <form className="border-t border-zinc-800 p-4" onSubmit={handleAsk} ref={chatFormRef}>

@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
-import { addChatMessage, createChatSession, getChatMessages, getProjectChunks } from "@/lib/db";
-import { embedText } from "@/lib/embedding";
-import { generateAnswer } from "@/lib/llm";
+import { getContainer } from "@/lib/composition/container";
+import { runChatTurn } from "@/lib/composition/ragPipeline";
 import { LlmProvider, RetrievalMode } from "@/lib/types";
-import { rankChunks } from "@/lib/vector";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,7 +16,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "projectId is required" }, { status: 400 });
     }
 
-    const messages = getChatMessages(projectId, sessionId);
+    const messages = getContainer().chatRepo.getMessages(projectId, sessionId);
     return NextResponse.json({ messages });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -37,7 +35,7 @@ export async function POST(request: Request) {
       retrievalMode?: RetrievalMode;
     };
     const projectId = body.projectId?.trim();
-    let sessionId = body.sessionId?.trim();
+    const sessionId = body.sessionId?.trim();
     const message = body.message?.trim();
     const provider = body.provider || "openai";
     const model = body.model?.trim();
@@ -75,69 +73,25 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!sessionId) {
-      const newSession = createChatSession(projectId, message.slice(0, 80));
-      sessionId = newSession.id;
-    }
-
-    addChatMessage({
+    const result = await runChatTurn({
       projectId,
       sessionId,
-      role: "user",
-      content: message,
-    });
-
-    const queryEmbedding = await embedText(message);
-    const projectChunks = getProjectChunks(projectId);
-
-    if (projectChunks.length === 0) {
-      const answer = "I don't know";
-      addChatMessage({
-        projectId,
-        sessionId,
-        role: "assistant",
-        content: answer,
-      });
-      return NextResponse.json({
-        answer: "I don't know",
-        sources: [],
-        chunksUsed: 0,
-        reason: "no_indexed_chunks",
-      });
-    }
-
-    const topChunks = rankChunks(queryEmbedding, projectChunks, 5, retrievalMode);
-    const answer = await generateAnswer(
       message,
-      topChunks.map((chunk) => chunk.content),
-      { provider, model },
-    );
-
-    const sourcePaths = Array.from(
-      new Set(
-        topChunks
-          .map((chunk) => chunk.metadata.filePath)
-          .filter((value): value is string => typeof value === "string"),
-      ),
-    );
-
-    addChatMessage({
-      projectId,
-      sessionId,
-      role: "assistant",
-      content: answer,
-      sources: sourcePaths,
+      provider,
+      model,
+      retrievalMode,
     });
 
     return NextResponse.json({
-      answer,
-      sources: sourcePaths,
-      chunksUsed: topChunks.length,
-      provider,
-      model,
-      sessionId,
-      retrievalMode,
-      reason: topChunks.length === 0 ? "no_retrieved_chunks" : "ok",
+      answer: result.answer,
+      sources: result.sources,
+      chunksUsed: result.chunksUsed,
+      provider: result.provider,
+      model: result.model,
+      sessionId: result.sessionId,
+      retrievalMode: result.retrievalMode,
+      reason: result.reason,
+      grounding: result.grounding,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createIndexJob, getIndexJob } from "@/lib/indexJobs";
+import { createProjectIndexJob, getIndexJob } from "@/lib/composition/ragPipeline";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,7 +32,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "projectId is required" }, { status: 400 });
     }
 
-    const job = createIndexJob(projectId, body.folderPath);
+    const job = createProjectIndexJob(projectId, body.folderPath);
     return NextResponse.json({ job }, { status: 202 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

@@ -25,6 +25,10 @@ const DEFAULT_MODELS: Record<LlmProvider, string> = {
 type GenerateAnswerOptions = {
   provider?: LlmProvider;
   model?: string;
+  recentConversation?: Array<{
+    role: "user" | "assistant";
+    content: string;
+  }>;
 };
 
 function isIDontKnow(text: string): boolean {
@@ -32,7 +36,65 @@ function isIDontKnow(text: string): boolean {
   return normalized === "i don't know" || normalized === "i dont know";
 }
 
-function buildPrompt(question: string, contextChunks: string[]): string {
+const MAX_RECENT_MESSAGES = 8;
+const MAX_CONVERSATION_CHARS = 4000;
+const MAX_CONTEXT_CHARS = 12000;
+
+function capRecentConversation(
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const normalized = messages
+    .map((message) => ({
+      role: message.role,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+
+  const trimmed = normalized.slice(-MAX_RECENT_MESSAGES);
+  const selected: Array<{ role: "user" | "assistant"; content: string }> = [];
+  let usedChars = 0;
+  for (let i = trimmed.length - 1; i >= 0; i -= 1) {
+    const candidate = trimmed[i];
+    const nextCount = usedChars + candidate.content.length;
+    if (selected.length > 0 && nextCount > MAX_CONVERSATION_CHARS) {
+      break;
+    }
+    selected.unshift(candidate);
+    usedChars = nextCount;
+  }
+  return selected;
+}
+
+function capContextChunks(contextChunks: string[]): string[] {
+  const selected: string[] = [];
+  let usedChars = 0;
+  for (const chunk of contextChunks) {
+    const text = chunk.trim();
+    if (!text) {
+      continue;
+    }
+    const nextCount = usedChars + text.length;
+    if (selected.length > 0 && nextCount > MAX_CONTEXT_CHARS) {
+      break;
+    }
+    selected.push(text);
+    usedChars = nextCount;
+  }
+  return selected;
+}
+
+function buildPrompt(
+  question: string,
+  contextChunks: string[],
+  recentConversation: Array<{ role: "user" | "assistant"; content: string }>,
+): string {
+  const boundedConversation = capRecentConversation(recentConversation);
+  const boundedContext = capContextChunks(contextChunks);
+  const conversationSection =
+    boundedConversation.length === 0
+      ? "(none)"
+      : boundedConversation.map((message) => `${message.role}: ${message.content}`).join("\n\n");
+
   return [
     "You are answering based only on the provided context.",
     "If relevant facts exist in the context, provide the best direct answer from those facts.",
@@ -40,8 +102,11 @@ function buildPrompt(question: string, contextChunks: string[]): string {
     "Prefer concise markdown.",
     "You may use light emojis when helpful for readability.",
     "",
+    "Recent conversation:",
+    conversationSection,
+    "",
     "Context:",
-    contextChunks.join("\n\n---\n\n"),
+    boundedContext.join("\n\n---\n\n"),
     "",
     "Question:",
     question,
@@ -237,7 +302,7 @@ export async function generateAnswer(
 ): Promise<string> {
   const provider = options.provider || "openai";
   const model = options.model?.trim() || DEFAULT_MODELS[provider];
-  const prompt = buildPrompt(question, contextChunks);
+  const prompt = buildPrompt(question, contextChunks, options.recentConversation ?? []);
 
   if (provider === "gemini") {
     return generateWithGemini(prompt, model);
